@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+target/
+.mvn/wrapper/maven-wrapper.jar
+
+# Build output
+dist/
+dist-ssr/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# IDE - STS
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+# IDE - NetBeans
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# IDE - VS Code
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Cache
+.vite/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+HELP.md
+AUTHENTICATION_SETUP.md
+IMPLEMENTATION_SUMMARY.md
+TESTING_GUIDE.md
+ATTRIBUTIONS.md
+documentation
