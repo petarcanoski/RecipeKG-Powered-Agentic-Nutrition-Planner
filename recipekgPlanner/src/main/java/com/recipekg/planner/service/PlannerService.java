@@ -41,7 +41,7 @@ public class PlannerService {
                 .findFirst()
                 .orElseThrow();
 
-        String planJson = orchestrator.generateFullPlan(profile);
+        String planJson = orchestrator.generateFullPlan(profile).toString();
 
         WeekPlanDTO dto =
                 planParserService.parseAndValidate(planJson);
