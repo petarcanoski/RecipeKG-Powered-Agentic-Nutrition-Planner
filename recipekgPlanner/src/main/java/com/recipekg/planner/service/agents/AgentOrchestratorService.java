@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -28,16 +29,58 @@ public class AgentOrchestratorService {
 
     public PantryResponse generateFullPlan(UserProfile profile) {
 
+
         MedicalManifest medical = medicalAgent.generateMedicalAdvice(profile);
 
-        PantryResponse pantryResponse =
-                foodScientist.fetchSafePantry(profile, medical);
 
-        // Fetch macros from usda via api
+        PantryResponse pantryResponse = foodScientist.fetchSafePantry(profile, medical);
+
+
         usdaApiClient.populateMacros(pantryResponse.getRecipes());
 
 
+        if ("CONSTRAINED".equalsIgnoreCase(medical.status()) && medical.constraints() != null) {
+            List<RecipeCandidate> capped =
+            foodScientist.filterByNutrientCaps(
+                    pantryResponse.getRecipes(),
+                    medical.constraints().nutrientCaps()
+            );
+
+            List<RecipeCandidate> ultraSafeRecipes =
+            applyTierTwoSafetyAndCleanup(capped, medical.constraints().hardExclusions());
+
+            pantryResponse = new PantryResponse(
+                pantryResponse.getSparqlQuery(),
+                ultraSafeRecipes,
+                medical
+            );
+        }
 
         return pantryResponse;
+    }
+
+
+    private List<RecipeCandidate> applyTierTwoSafetyAndCleanup(List<RecipeCandidate> candidates, List<String> unrolledKeywords) {
+
+        if (unrolledKeywords == null || unrolledKeywords.isEmpty()) {
+            return candidates;
+        }
+
+
+        String regexPattern = unrolledKeywords.stream()
+                .map(String::toLowerCase)
+                .collect(Collectors.joining("|"));
+
+        return candidates.stream()
+
+                .filter(recipe -> recipe.getCalories() > 5.0)
+
+                .filter(recipe -> {
+                    if (recipe.getUsdaIngredientText() == null) return true;
+                    String text = recipe.getUsdaIngredientText().toLowerCase();
+
+                    return !text.matches(".*(" + regexPattern + ").*");
+                })
+                .collect(Collectors.toList());
     }
 }

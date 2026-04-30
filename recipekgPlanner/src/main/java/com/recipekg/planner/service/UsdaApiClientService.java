@@ -22,15 +22,17 @@ public class UsdaApiClientService {
     private final ObjectMapper mapper = new ObjectMapper();
 
     public void populateMacros(List<RecipeCandidate> recipes) {
-        // 1. Gather all unique USDA IDs and cast them to STRICT INTEGERS
         Set<Integer> uniqueIds = new HashSet<>();
+
+        // 1. EXTRACT THE IDS FROM THE URLs
         for (RecipeCandidate recipe : recipes) {
-            for (String idString : recipe.getUsdaIngredientIds()) {
+            for (String rawUrl : recipe.getUsdaIngredientIds()) {
                 try {
-                    // This strips out any accidental spaces or non-numeric graph junk
-                    uniqueIds.add(Integer.parseInt(idString.trim()));
-                } catch (NumberFormatException e) {
-                    System.out.println("Invalid id found");
+                    // Grab everything after the final slash (e.g., "173161")
+                    String cleanId = rawUrl.substring(rawUrl.lastIndexOf('/') + 1).trim();
+                    uniqueIds.add(Integer.parseInt(cleanId));
+                } catch (Exception e) {
+                    // Silently ignore malformed strings
                 }
             }
         }
@@ -40,40 +42,55 @@ public class UsdaApiClientService {
             return;
         }
 
-        // 2. Fetch the macro dictionary from USDA in one bulk call
-        Map<String, double[]> macroDictionary = fetchMacrosFromUsda(new ArrayList<>(uniqueIds));
+        // 2. Fetch the macro dictionary from USDA
+        Map<String, Object[]> dataDictionary = fetchMacrosFromUsda(new ArrayList<>(uniqueIds));
 
-        // 3. Sum up the macros for each recipe
+        // 3. MAP THE DICTIONARY BACK TO THE RECIPES
         for (RecipeCandidate recipe : recipes) {
-            double totalCal = 0, totalProt = 0, totalCarbs = 0, totalFat = 0;
+            double totalCal = 0, totalProt = 0, totalCarbs = 0, totalFat = 0, totalSugar=0,totalSodium=0;
+            StringBuilder combinedUsdaText = new StringBuilder();
 
-            for (String idString : recipe.getUsdaIngredientIds()) {
-                String cleanId = idString.trim(); // Match the trimmed string
+            for (String rawUrl : recipe.getUsdaIngredientIds()) {
+            try {
+                String cleanId = rawUrl.substring(rawUrl.lastIndexOf('/') + 1).trim();
 
-                if (macroDictionary.containsKey(cleanId)) {
-                    double[] macros = macroDictionary.get(cleanId);
-                    totalCal += macros[0];   // Energy
-                    totalProt += macros[1];  // Protein
-                    totalCarbs += macros[2]; // Carbs
-                    totalFat += macros[3];   // Fat
+                if (dataDictionary.containsKey(cleanId)) {
+                    Object[] usdaData = dataDictionary.get(cleanId);
+                    double[] macros = (double[]) usdaData[0];
+                    String text = (String) usdaData[1];
+
+                    totalCal += macros[0];
+                    totalProt += macros[1];
+                    totalCarbs += macros[2];
+                    totalFat += macros[3];
+                    totalSugar += macros[4];
+                    totalSodium += macros[5];
+
+                    combinedUsdaText.append(text).append(" ");
                 }
+            } catch (Exception e) {
+                // Ignore mapping errors
             }
+        }
+
 
             recipe.setCalories(Math.round(totalCal));
             recipe.setProtein(Math.round(totalProt));
             recipe.setCarbs(Math.round(totalCarbs));
             recipe.setFat(Math.round(totalFat));
+            recipe.setSugar(Math.round(totalSugar));
+            recipe.setSodium(Math.round(totalSodium));
+            recipe.setUsdaIngredientText(combinedUsdaText.toString().trim());
         }
     }
 
-    private Map<String, double[]> fetchMacrosFromUsda(List<Integer> fdcIds) {
-        Map<String, double[]> result = new HashMap<>();
+    private Map<String, Object[]> fetchMacrosFromUsda(List<Integer> fdcIds) {
+        Map<String, Object[]> result = new HashMap<>();
         String url = "https://api.nal.usda.gov/fdc/v1/foods?api_key=" + apiKey;
 
-        // Send Integers, and use the "abridged" format for a much faster API response
         Map<String, Object> requestBody = Map.of(
-                "fdcIds", fdcIds,
-                "format", "abridged"
+            "fdcIds", fdcIds,
+            "format", "full"
         );
 
         HttpHeaders headers = new HttpHeaders();
@@ -81,34 +98,46 @@ public class UsdaApiClientService {
 
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
 
-        try {
-            String response = restTemplate.postForObject(url, request, String.class);
-            JsonNode root = mapper.readTree(response);
+         try {
+        String response = restTemplate.postForObject(url, new HttpEntity<>(requestBody, headers), String.class);
+        JsonNode root = mapper.readTree(response);
 
-            // Parse the USDA response format
-            for (JsonNode food : root) {
-                // We read it back as a string here so it matches the Recipe object's List<String>
-                String fdcId = food.path("fdcId").asText();
-                JsonNode nutrients = food.path("foodNutrients");
+        for (JsonNode food : root) {
+            String fdcId = food.path("fdcId").asText();
+            JsonNode nutrients = food.path("foodNutrients");
 
-                double cal = 0, prot = 0, carbs = 0, fat = 0;
-
-                for (JsonNode nut : nutrients) {
-                    // In the 'abridged' format, the nutrient names are often found like this:
-                    String name = nut.path("name").asText("");
-                    double amount = nut.path("amount").asDouble(0.0);
-
-                    if (name.equalsIgnoreCase("Energy")) cal = amount;
-                    else if (name.equalsIgnoreCase("Protein")) prot = amount;
-                    else if (name.equalsIgnoreCase("Carbohydrate, by difference")) carbs = amount;
-                    else if (name.equalsIgnoreCase("Total lipid (fat)")) fat = amount;
-                }
-
-                result.put(fdcId, new double[]{cal, prot, carbs, fat});
+            String ingredientsText = food.path("ingredients").asText("");
+            if (ingredientsText.isEmpty()) {
+                ingredientsText = food.path("description").asText("");
             }
-        } catch (Exception e) {
-            System.err.println("USDA API Call Failed: " + e.getMessage());
+
+            double cal = 0, prot = 0, carbs = 0, fat = 0, sugar = 0, sodium = 0;
+
+            for (JsonNode nut : nutrients) {
+                String name = nut.path("name").asText("");
+                if (name.isEmpty()) name = nut.path("nutrientName").asText("");
+                if (name.isEmpty()) name = nut.path("nutrient").path("name").asText("");
+
+                String number = nut.path("nutrientNumber").asText("");
+                if (number.isEmpty()) number = nut.path("nutrient").path("number").asText("");
+
+                double amount = nut.path("amount").asDouble(0.0);
+
+                if (name.equalsIgnoreCase("Energy")) cal = amount;
+                else if (name.equalsIgnoreCase("Protein")) prot = amount;
+                else if (name.equalsIgnoreCase("Carbohydrate, by difference")) carbs = amount;
+                else if (name.equalsIgnoreCase("Total lipid (fat)")) fat = amount;
+                else if (name.equalsIgnoreCase("Total Sugars")
+                        || name.toLowerCase().contains("sugars, total")
+                        || "269".equals(number)) sugar = amount;
+                else if (name.equalsIgnoreCase("Sodium, Na")) sodium = amount;
+            }
+
+            result.put(fdcId, new Object[]{new double[]{cal, prot, carbs, fat, sugar, sodium}, ingredientsText});
         }
-        return result;
+    } catch (Exception e) {
+        System.err.println("USDA API Call Failed: " + e.getMessage());
+    }
+    return result;
     }
 }

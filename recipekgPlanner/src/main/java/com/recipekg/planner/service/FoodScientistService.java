@@ -37,7 +37,7 @@ public class FoodScientistService {
 //            sparqlQuery = buildUnconstrainedQuery(profile);
         }
 
-        // Execute the query and return the Java objects
+        // Execute the query
         List<RecipeCandidate> results = graphDbRepository.executeSparql(sparqlQuery);
 
         return new PantryResponse(sparqlQuery, results,manifest);
@@ -47,7 +47,8 @@ public class FoodScientistService {
         StringBuilder query = new StringBuilder();
         query.append(SPARQL_PREFIXES).append("\n");
 
-        query.append("SELECT ?recipe ?recipeLabel (GROUP_CONCAT(DISTINCT ?fdcId; separator=\",\") AS ?usdaIds) \n");
+
+        query.append("SELECT ?recipe ?recipeLabel (GROUP_CONCAT(DISTINCT ?usdaUrl; separator=\",\") AS ?usdaIds) \n");
         query.append("WHERE {\n");
 
 
@@ -56,41 +57,91 @@ public class FoodScientistService {
         query.append("      ?recipe a heals:recipe ; rdfs:label ?recipeLabel .\n");
 
         if (manifest.constraints() != null) {
-            injectFoodOnExclusions(query, manifest.constraints().hardExclusions());
+            injectKeywordExclusions(query, manifest.constraints().hardExclusions());
         }
 
         query.append("    }\n");
         query.append("    ORDER BY UUID()\n"); // Shuffle the safe recipes
-        query.append("    LIMIT 50\n");
+        query.append("    LIMIT 100\n");
         query.append("  }\n\n");
 
-        // FDC IDs for the ingredients
+
         query.append("  ?recipe heals:uses/heals:ing_name ?name .\n");
         query.append("  ?name owl:equivalentClass ?usdaItem .\n");
-        query.append("  BIND(REPLACE(STR(?usdaItem), \"^.*/\", \"\") AS ?fdcId) \n");
+
+
+        query.append("  FILTER(CONTAINS(STR(?usdaItem), \"fdc.nal.usda.gov\")) \n");
+
+
+        query.append("  BIND(STR(?usdaItem) AS ?usdaUrl) \n");
 
         query.append("}\n");
         query.append("GROUP BY ?recipe ?recipeLabel\n");
 
         return query.toString();
     }
-
-    private void injectFoodOnExclusions(StringBuilder query, List<String> exclusions) {
+    private void injectKeywordExclusions(StringBuilder query, List<String> exclusions) {
         if (exclusions == null || exclusions.isEmpty()) return;
 
 
         String regexPattern = exclusions.stream()
-                .map(ex -> ex.toLowerCase().replace(" product", "")) // Strip the word "product"
+                .map(String::toLowerCase)
                 .collect(Collectors.joining("|"));
 
-        query.append("      # --- FOODON SEMANTIC EXCLUSIONS ---\n");
+        query.append("      # --- TIER 1: FAST LOCAL INGREDIENT EXCLUSION ---\n");
         query.append("      FILTER NOT EXISTS {\n");
-        query.append("        ?recipe heals:uses/heals:ing_name/owl:equivalentClass/rdfs:subClassOf* ?parentClass .\n");
-        query.append("        ?parentClass rdfs:label ?foLabel .\n");
-        // Search the FoodOn tree for any label containing forbidden
-        query.append("        FILTER(REGEX(STR(?foLabel), \"").append(regexPattern).append("\", \"i\"))\n");
+        // We look strictly at the text label of the ingredient. No tree climbing!
+        query.append("        ?recipe heals:uses/heals:ing_name/rdfs:label ?ingLabel .\n");
+        query.append("        FILTER(REGEX(STR(?ingLabel), \"").append(regexPattern).append("\", \"i\"))\n");
         query.append("      }\n\n");
     }
+
+
+    public List<RecipeCandidate> filterByNutrientCaps(List<RecipeCandidate> recipes, List<NutrientCap> caps) {
+    if (caps == null || caps.isEmpty()) return recipes;
+
+    return recipes.stream()
+            .filter(recipe -> withinCaps(recipe, caps))
+            .collect(Collectors.toList());
+}
+
+private boolean withinCaps(RecipeCandidate recipe, List<NutrientCap> caps) {
+    for (NutrientCap cap : caps) {
+        if (cap == null || cap.nutrient() == null) continue;
+
+        String key = cap.nutrient().trim().toLowerCase();
+        double value = resolveNutrientValue(recipe, key);
+
+        if (Double.isNaN(value)) continue;
+
+        double normalized = normalizeUnit(value, key, cap.unit());
+
+        if (normalized > cap.maxValue()) return false;
+    }
+    return true;
+}
+
+private double resolveNutrientValue(RecipeCandidate recipe, String key) {
+    if (key.equals("carbohydrate, by difference")) return recipe.getCarbs();
+    if (key.equals("sodium, na") || key.equals("sodium")) return recipe.getSodium();
+    if (key.contains("sugars, total")) return recipe.getSugar();
+    if (key.equals("energy")) return recipe.getCalories();
+    if (key.equals("protein")) return recipe.getProtein();
+    if (key.equals("total lipid (fat)") || key.equals("fat")) return recipe.getFat();
+    return Double.NaN;
+}
+
+private double normalizeUnit(double value, String nutrientKey, String unit) {
+    if (unit == null) return value;
+
+    String u = unit.trim().toLowerCase();
+    boolean baseIsMg = nutrientKey.startsWith("sodium");
+
+    if (baseIsMg && u.equals("g")) return value / 1000.0;
+    if (!baseIsMg && u.equals("mg")) return value * 1000.0;
+
+    return value;
+}
 
 
     private void injectUsdaNutrientCaps(StringBuilder query, List<NutrientCap> caps) {

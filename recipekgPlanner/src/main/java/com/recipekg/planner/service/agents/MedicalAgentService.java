@@ -23,7 +23,7 @@ public class MedicalAgentService {
         this.webClient = webClient;
     }
 
-    // ⭐ Changed return type to MedicalManifest
+
     public MedicalManifest generateMedicalAdvice(UserProfile profile) {
 
         String prompt = """
@@ -35,14 +35,17 @@ public class MedicalAgentService {
            - If 'Allergies' is "None" AND 'Diseases/Conditions' is "None", you MUST set "status": "UNCONSTRAINED". 
            - Do NOT apply general population preventative guidelines (like WHO sodium caps) to healthy users.
            - ONLY set "status": "CONSTRAINED" if the user has a specific allergy, disease, or clinical condition requiring strict filtering.
-        2. 'hard_exclusions': You must map the user's allergies to the FoodOn ontology format.
-                Study the following examples to understand the database's specific labeling pattern:
+        2. 'hard_exclusions': Your job is to act as a Keyword Unroller. You must translate the user's dietary restrictions into a flat JSON array of singular, root ingredient keywords and common foods that contain them.
+                - Do NOT use broad ontology categories. Unroll them into specific, high-risk ingredients.
+                - Strip pluralization (e.g., use "peanut" not "peanuts").
+                
                 EXAMPLES:
-                - User: "I'm allergic to dairy and milk." -> Output: ["dairy food product"]
-                - User: "I have a severe nut." -> Output: ["nut food product"]
-                - User: "No gluten or wheat." -> Output: ["wheat food product"]
-                - User: "Allergic to eggs." -> Output: ["egg food product"]
-        3. 'nutrient_caps': You MUST use standard USDA nutrient names (e.g., "Sodium", "Carbohydrate, by difference").
+                - User: "I have a fish allergy." -> Output: ["fish", "salmon", "tuna", "cod", "trout"]
+                - User: "I have a dairy allergy" -> Output: ["milk", "cheese", "butter", "whey"]
+                - Uer: "I have a gluten allergy" -> Output: ["wheat", "bread", "flour", "pasta", "crouton", "pretzel"]
+                
+        
+        3. 'nutrient_caps': You MUST use standard USDA nutrient names (e.g., "Sodium", "Carbohydrate, Total Sugars").
         4. IF UNCONSTRAINED: Leave the 'hard_exclusions', 'nutrient_caps', and 'required_boosts' arrays completely EMPTY.
         
         USER PROFILE:
@@ -108,10 +111,35 @@ public class MedicalAgentService {
                     .get("text")
                     .asText();
 
-            return mapper.readValue(jsonText, MedicalManifest.class);
+            return parseMedicalManifest(jsonText);
 
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse Gemini response into MedicalManifest", e);
         }
     }
+
+        private MedicalManifest parseMedicalManifest(String jsonText) throws Exception {
+                String trimmed = jsonText == null ? "" : jsonText.trim();
+
+                if (trimmed.startsWith("```")) {
+                        int firstLineEnd = trimmed.indexOf('\n');
+                        if (firstLineEnd >= 0) {
+                                trimmed = trimmed.substring(firstLineEnd + 1);
+                        }
+                        int lastFence = trimmed.lastIndexOf("```");
+                        if (lastFence >= 0) {
+                                trimmed = trimmed.substring(0, lastFence);
+                        }
+                        trimmed = trimmed.trim();
+                }
+
+                if (trimmed.startsWith("[")) {
+                        JsonNode arrayNode = mapper.readTree(trimmed);
+                        if (arrayNode.isArray() && arrayNode.size() > 0) {
+                                return mapper.treeToValue(arrayNode.get(0), MedicalManifest.class);
+                        }
+                }
+
+                return mapper.readValue(trimmed, MedicalManifest.class);
+        }
 }
