@@ -123,10 +123,10 @@ Goal: %s
 ActivityLevel: %s
 Diseases: %s
 Allergies: %s
-Daily calories target: %d
-Protein grams: %d
-Carbs grams: %d
-Fats grams: %d
+Daily calories target: %.2f
+Protein grams: %.2f
+Carbs grams: %.2f
+Fats grams: %.2f
 
 MEDICAL_ADVICE:
 %s

@@ -6,8 +6,6 @@ import com.recipekg.planner.model.UserProfile;
 import com.recipekg.planner.model.NutrientCap;
 import com.recipekg.planner.repository.GraphDbRepository;
 import com.recipekg.planner.response.PantryResponse;
-import com.recipekg.planner.service.agents.ServingsEstimatorService;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;
@@ -20,18 +18,10 @@ public class FoodScientistService {
 
     private final GraphDbRepository graphDbRepository;
     private final UsdaApiClientService usdaApiClientService;
-    private final ServingsEstimatorService servingsEstimatorService;
 
-    @Value("${servings.llm.enabled:true}")
-    private boolean servingsLlmEnabled;
-
-    @Value("${servings.llm.max-calls-per-request:8}")
-    private int maxServingsEstimates;
-
-    public FoodScientistService(GraphDbRepository graphDbRepository, UsdaApiClientService usdaApiClientService, ServingsEstimatorService servingsEstimatorService) {
+    public FoodScientistService(GraphDbRepository graphDbRepository, UsdaApiClientService usdaApiClientService) {
         this.graphDbRepository = graphDbRepository;
         this.usdaApiClientService = usdaApiClientService;
-        this.servingsEstimatorService = servingsEstimatorService;
     }
 
     private static final String SPARQL_PREFIXES = """
@@ -44,25 +34,17 @@ public class FoodScientistService {
             """;
 
     public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest) {
-        String sparqlQuery = "";
-
-        if ("CONSTRAINED".equalsIgnoreCase(manifest.status())) {
-            sparqlQuery = buildSafeCandidateQuery(manifest);
-        } else {
-            // sparqlQuery = buildUnconstrainedQuery(profile);
-        }
+        String sparqlQuery = buildSafeCandidateQuery(manifest);
 
         // --- TIER 0 & 1: Fetch 100 raw recipes from GraphDB (Allergen Filtered) ---
         List<RecipeCandidate> results = graphDbRepository.executeSparql(sparqlQuery);
 
         // --- TIER 2a: Volumetric Macro Calculation ---
-        // Uses Solution 3: USDA foodPortions + Java arithmetic
+        // Populates per-serving macros using USDA per-100g data and deterministic serving estimates.
         usdaApiClientService.populateMacros(results);
 
-        applyEstimatedServings(results);
-
         // --- TIER 2b: Generic Nutrient Cap Filtering ---
-        // Dynamically enforces every nutrient limit in the manifest
+        // Dynamically enforces every nutrient limit in the manifest against per-serving macros.
         if ("CONSTRAINED".equalsIgnoreCase(manifest.status())) {
             results = enforceMedicalCaps(results, manifest);
         }
@@ -76,7 +58,7 @@ public class FoodScientistService {
     StringBuilder query = new StringBuilder();
     query.append(SPARQL_PREFIXES).append("\n");
 
-    query.append("SELECT ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit (SAMPLE(?usdaUrl) AS ?usdaUrl) (SAMPLE(?servings) AS ?servings) \n");
+    query.append("SELECT DISTINCT ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit (SAMPLE(?usdaUrl) AS ?usdaUrl) (SAMPLE(?servings) AS ?servings) \n");
     query.append("WHERE {\n");
 
     query.append("  {\n");
@@ -124,34 +106,29 @@ public class FoodScientistService {
     private void injectKeywordExclusions(StringBuilder query, List<String> exclusions) {
     if (exclusions == null || exclusions.isEmpty()) return;
 
-    String contains = exclusions.stream()
-            .filter(Objects::nonNull)
-            .map(String::trim)
-            .filter(s -> !s.isEmpty())
-            .map(s -> s.toLowerCase()
-                    .replace("\\", "\\\\")
-                    .replace("\"", "\\\""))
+    List<String> sanitizedExclusions = sanitizeExclusions(exclusions);
+
+    String ingredientContains = sanitizedExclusions.stream()
             .map(s -> "CONTAINS(LCASE(STR(?badName)), \"" + s + "\")")
             .collect(Collectors.joining(" || "));
 
-    if (contains.isEmpty()) return;
+    String labelContains = sanitizedExclusions.stream()
+            .map(s -> "CONTAINS(LCASE(STR(?recipeLabel)), \"" + s + "\")")
+            .collect(Collectors.joining(" || "));
+
+    if (ingredientContains.isEmpty()) return;
 
     query.append("      # --- TIER 0: DIRECT INGREDIENT EXCLUSION ---\n");
+    query.append("      FILTER(!(").append(labelContains).append("))\n");
     query.append("      FILTER NOT EXISTS {\n");
     query.append("        ?recipe heals:uses/heals:ing_name ?badName .\n");
-    query.append("        FILTER(").append(contains).append(")\n");
+    query.append("        FILTER(").append(ingredientContains).append(")\n");
     query.append("      }\n\n");
 }
    private void injectSemanticExclusions(StringBuilder query, List<String> exclusions) {
     if (exclusions == null || exclusions.isEmpty()) return;
 
-    String termPattern = exclusions.stream()
-        .filter(Objects::nonNull)
-        .map(String::trim)
-        .filter(s -> !s.isEmpty())
-        .map(s -> s.toLowerCase()
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\""))
+    String termPattern = sanitizeExclusions(exclusions).stream()
         .map(s -> s.replaceAll("([.^$*+?()\\[\\]{}|\\\\])", "\\\\$1"))
         .collect(Collectors.joining("|"));
 
@@ -182,6 +159,18 @@ public class FoodScientistService {
     query.append("      }\n\n");
     }
 
+private List<String> sanitizeExclusions(List<String> exclusions) {
+    return exclusions.stream()
+            .filter(Objects::nonNull)
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .map(s -> s.toLowerCase()
+                    .replace("\\", "\\\\")
+                    .replace("\"", "\\\""))
+            .distinct()
+            .toList();
+}
+
 
     private List<RecipeCandidate> enforceMedicalCaps(List<RecipeCandidate> candidates, MedicalManifest manifest) {
     if (manifest.constraints() == null || manifest.constraints().nutrientCaps() == null || manifest.constraints().nutrientCaps().isEmpty()) {
@@ -199,11 +188,8 @@ public class FoodScientistService {
  * Validates a single recipe against ALL active medical nutrient caps.
  */
 private boolean isRecipeSafe(RecipeCandidate recipe, List<NutrientCap> caps) {
-    double servings = resolveServings(recipe);
-
     for (NutrientCap cap : caps) {
-        double batchValue = getMacroValueByName(recipe, cap.nutrient());
-        double servingValue = batchValue / servings;
+        double servingValue = getMacroValueByName(recipe, cap.nutrient());
 
         // If even ONE nutrient exceeds the limit, the recipe is discarded
         if (servingValue > cap.maxValue()) {
@@ -219,6 +205,8 @@ private boolean isRecipeSafe(RecipeCandidate recipe, List<NutrientCap> caps) {
  * to the actual data fields in our RecipeCandidate.
  */
 private double getMacroValueByName(RecipeCandidate recipe, String nutrientName) {
+    if (nutrientName == null || nutrientName.isBlank()) return 0.0;
+
     String name = nutrientName.toLowerCase();
 
     if (name.contains("energy") || name.contains("calories")) return recipe.getCalories();
@@ -230,34 +218,6 @@ private double getMacroValueByName(RecipeCandidate recipe, String nutrientName) 
     if (name.contains("sodium")) return recipe.getSodium();
 
     return 0.0; // Default if nutrient isn't tracked in our local model
-}
-
-private double resolveServings(RecipeCandidate recipe) {
-    Double servings = recipe.getServings();
-    if (servings != null && servings > 0) {
-        return servings;
-    }
-    return 4.0;
-}
-
-private void applyEstimatedServings(List<RecipeCandidate> recipes) {
-    if (!servingsLlmEnabled || recipes == null || recipes.isEmpty()) return;
-
-    int remaining = maxServingsEstimates;
-
-    for (RecipeCandidate recipe : recipes) {
-        if (remaining <= 0) break;
-
-        Double servings = recipe.getServings();
-        if (servings != null && servings > 0) continue;
-
-        Double estimated = servingsEstimatorService.estimateServings(recipe);
-        if (estimated != null && estimated > 0) {
-            recipe.setServings(estimated);
-        }
-
-        remaining--;
-    }
 }
 
 }

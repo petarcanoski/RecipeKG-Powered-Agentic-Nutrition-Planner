@@ -56,10 +56,10 @@ public class MacroCalculatorService {
                 (tdee - protein * 4 - fats * 9) / 4;
 
         return new MacroTargets(
-                Math.round(tdee),
-                Math.round(protein),
-                Math.round(carbs),
-                Math.round(fats)
+                tdee,
+                protein,
+                carbs,
+                fats
         );
     }
 
@@ -67,9 +67,9 @@ public class MacroCalculatorService {
     @AllArgsConstructor
     public static class MacroTargets {
 
-        private long calories;
-        private long protein;
-        private long carbs;
-        private long fats;
+        private double calories;
+        private double protein;
+        private double carbs;
+        private double fats;
     }
 }
