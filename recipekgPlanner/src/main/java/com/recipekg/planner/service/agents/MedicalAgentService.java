@@ -45,7 +45,12 @@ public class MedicalAgentService {
                 - Uer: "I have a gluten allergy" -> Output: ["wheat", "bread", "flour", "pasta", "crouton", "pretzel"]
                 
         
-        3. 'nutrient_caps': You MUST use standard USDA nutrient names (e.g., "Sodium", "Carbohydrate, Total Sugars").
+        3. 'nutrient_caps' RULES:
+                - Each entry must contain exactly one USDA nutrient name.
+                - Do NOT combine nutrients (no commas, no "and", no grouping).
+                - Do NOT repeat the same nutrient more than once.
+                - Use canonical USDA names only (examples: "Carbs", "Sugar",
+                "Sodium", "Energy", "Protein", "Fat").
         4. IF UNCONSTRAINED: Leave the 'hard_exclusions', 'nutrient_caps', and 'required_boosts' arrays completely EMPTY.
         
         USER PROFILE:

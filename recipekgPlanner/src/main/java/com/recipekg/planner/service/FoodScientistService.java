@@ -1,23 +1,37 @@
 package com.recipekg.planner.service;
 
 import com.recipekg.planner.model.MedicalManifest;
-import com.recipekg.planner.model.NutrientCap;
 import com.recipekg.planner.model.RecipeCandidate;
 import com.recipekg.planner.model.UserProfile;
+import com.recipekg.planner.model.NutrientCap;
 import com.recipekg.planner.repository.GraphDbRepository;
 import com.recipekg.planner.response.PantryResponse;
+import com.recipekg.planner.service.agents.ServingsEstimatorService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 @Service
 public class FoodScientistService {
 
     private final GraphDbRepository graphDbRepository;
+    private final UsdaApiClientService usdaApiClientService;
+    private final ServingsEstimatorService servingsEstimatorService;
 
-    public FoodScientistService(GraphDbRepository graphDbRepository) {
+    @Value("${servings.llm.enabled:true}")
+    private boolean servingsLlmEnabled;
+
+    @Value("${servings.llm.max-calls-per-request:8}")
+    private int maxServingsEstimates;
+
+    public FoodScientistService(GraphDbRepository graphDbRepository, UsdaApiClientService usdaApiClientService, ServingsEstimatorService servingsEstimatorService) {
         this.graphDbRepository = graphDbRepository;
+        this.usdaApiClientService = usdaApiClientService;
+        this.servingsEstimatorService = servingsEstimatorService;
     }
 
     private static final String SPARQL_PREFIXES = """
@@ -26,190 +40,224 @@ public class FoodScientistService {
             PREFIX owl: <http://www.w3.org/2002/07/owl#>
             PREFIX usda: <http://example.org/usda/>
             PREFIX foodon: <http://purl.obolibrary.org/obo/>
+            PREFIX oboInOwl: <http://www.geneontology.org/formats/oboInOwl#>
             """;
 
     public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest) {
-        String sparqlQuery="";
+        String sparqlQuery = "";
 
         if ("CONSTRAINED".equalsIgnoreCase(manifest.status())) {
             sparqlQuery = buildSafeCandidateQuery(manifest);
         } else {
-//            sparqlQuery = buildUnconstrainedQuery(profile);
+            // sparqlQuery = buildUnconstrainedQuery(profile);
         }
 
-        // Execute the query
+        // --- TIER 0 & 1: Fetch 100 raw recipes from GraphDB (Allergen Filtered) ---
         List<RecipeCandidate> results = graphDbRepository.executeSparql(sparqlQuery);
 
-        return new PantryResponse(sparqlQuery, results,manifest);
-    }
+        // --- TIER 2a: Volumetric Macro Calculation ---
+        // Uses Solution 3: USDA foodPortions + Java arithmetic
+        usdaApiClientService.populateMacros(results);
 
-    public String buildSafeCandidateQuery(MedicalManifest manifest) {
-        StringBuilder query = new StringBuilder();
-        query.append(SPARQL_PREFIXES).append("\n");
+        applyEstimatedServings(results);
 
-
-        query.append("SELECT ?recipe ?recipeLabel (GROUP_CONCAT(DISTINCT ?usdaUrl; separator=\",\") AS ?usdaIds) \n");
-        query.append("WHERE {\n");
-
-
-        query.append("  {\n");
-        query.append("    SELECT ?recipe ?recipeLabel WHERE {\n");
-        query.append("      ?recipe a heals:recipe ; rdfs:label ?recipeLabel .\n");
-
-        if (manifest.constraints() != null) {
-            injectKeywordExclusions(query, manifest.constraints().hardExclusions());
+        // --- TIER 2b: Generic Nutrient Cap Filtering ---
+        // Dynamically enforces every nutrient limit in the manifest
+        if ("CONSTRAINED".equalsIgnoreCase(manifest.status())) {
+            results = enforceMedicalCaps(results, manifest);
         }
 
-        query.append("    }\n");
-        query.append("    ORDER BY UUID()\n"); // Shuffle the safe recipes
-        query.append("    LIMIT 100\n");
-        query.append("  }\n\n");
+    
 
-
-        query.append("  ?recipe heals:uses/heals:ing_name ?name .\n");
-        query.append("  ?name owl:equivalentClass ?usdaItem .\n");
-
-
-        query.append("  FILTER(CONTAINS(STR(?usdaItem), \"fdc.nal.usda.gov\")) \n");
-
-
-        query.append("  BIND(STR(?usdaItem) AS ?usdaUrl) \n");
-
-        query.append("}\n");
-        query.append("GROUP BY ?recipe ?recipeLabel\n");
-
-        return query.toString();
+        return new PantryResponse(sparqlQuery, results, manifest);
     }
+
+   public String buildSafeCandidateQuery(MedicalManifest manifest) {
+    StringBuilder query = new StringBuilder();
+    query.append(SPARQL_PREFIXES).append("\n");
+
+    query.append("SELECT ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit (SAMPLE(?usdaUrl) AS ?usdaUrl) (SAMPLE(?servings) AS ?servings) \n");
+    query.append("WHERE {\n");
+
+    query.append("  {\n");
+    query.append("    SELECT DISTINCT ?recipe ?recipeLabel WHERE {\n");
+    query.append("      ?recipe a heals:recipe ; rdfs:label ?recipeLabel .\n");
+
+    if (manifest.constraints() != null) {
+        injectKeywordExclusions(query, manifest.constraints().hardExclusions());
+        injectSemanticExclusions(query, manifest.constraints().hardExclusions());
+    }
+
+    query.append("    }\n");
+    query.append("    ORDER BY RAND()\n");
+    query.append("    LIMIT 50\n");
+    query.append("  }\n\n");
+
+    query.append("  OPTIONAL { ?recipe heals:servings ?servings0 }\n");
+    query.append("  OPTIONAL { ?recipe heals:servingSize ?servings1 }\n");
+    query.append("  OPTIONAL { ?recipe heals:recipeYield ?servings2 }\n");
+    query.append("  OPTIONAL { ?recipe heals:yield ?servings3 }\n");
+    query.append("  OPTIONAL { ?recipe heals:serves ?servings4 }\n");
+    query.append("  OPTIONAL { ?recipe <http://schema.org/recipeYield> ?servings5 }\n");
+    query.append("  OPTIONAL { ?recipe <https://schema.org/recipeYield> ?servings6 }\n");
+    query.append("  BIND(COALESCE(?servings0, ?servings1, ?servings2, ?servings3, ?servings4, ?servings5, ?servings6) AS ?servings)\n");
+    query.append("\n");
+
+    query.append("  ?recipe heals:uses ?use .\n");
+    query.append("  ?use heals:ing_name ?ingName .\n");
+    query.append("  OPTIONAL { ?ingName rdfs:label ?ingLabel }\n");
+    query.append("  OPTIONAL { ?use heals:ing_quantity ?qty }\n");
+    query.append("  OPTIONAL { ?use heals:ing_unit ?unit }\n");
+    query.append("  OPTIONAL {\n");
+    query.append("    ?ingName owl:equivalentClass ?usdaItem .\n");
+    query.append("    FILTER(CONTAINS(STR(?usdaItem), \"fdc.nal.usda.gov\")) \n");
+    query.append("    BIND(STR(?usdaItem) AS ?usdaUrl) \n");
+    query.append("  }\n");
+
+    query.append("}\n");
+    query.append("GROUP BY ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit\n");
+
+    return query.toString();
+}
+
+
     private void injectKeywordExclusions(StringBuilder query, List<String> exclusions) {
-        if (exclusions == null || exclusions.isEmpty()) return;
+    if (exclusions == null || exclusions.isEmpty()) return;
 
+    String contains = exclusions.stream()
+            .filter(Objects::nonNull)
+            .map(String::trim)
+            .filter(s -> !s.isEmpty())
+            .map(s -> s.toLowerCase()
+                    .replace("\\", "\\\\")
+                    .replace("\"", "\\\""))
+            .map(s -> "CONTAINS(LCASE(STR(?badName)), \"" + s + "\")")
+            .collect(Collectors.joining(" || "));
 
-        String regexPattern = exclusions.stream()
-                .map(String::toLowerCase)
-                .collect(Collectors.joining("|"));
+    if (contains.isEmpty()) return;
 
-        query.append("      # --- TIER 1: FAST LOCAL INGREDIENT EXCLUSION ---\n");
-        query.append("      FILTER NOT EXISTS {\n");
-        // We look strictly at the text label of the ingredient. No tree climbing!
-        query.append("        ?recipe heals:uses/heals:ing_name/rdfs:label ?ingLabel .\n");
-        query.append("        FILTER(REGEX(STR(?ingLabel), \"").append(regexPattern).append("\", \"i\"))\n");
-        query.append("      }\n\n");
+    query.append("      # --- TIER 0: DIRECT INGREDIENT EXCLUSION ---\n");
+    query.append("      FILTER NOT EXISTS {\n");
+    query.append("        ?recipe heals:uses/heals:ing_name ?badName .\n");
+    query.append("        FILTER(").append(contains).append(")\n");
+    query.append("      }\n\n");
+}
+   private void injectSemanticExclusions(StringBuilder query, List<String> exclusions) {
+    if (exclusions == null || exclusions.isEmpty()) return;
+
+    String termPattern = exclusions.stream()
+        .filter(Objects::nonNull)
+        .map(String::trim)
+        .filter(s -> !s.isEmpty())
+        .map(s -> s.toLowerCase()
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\""))
+        .map(s -> s.replaceAll("([.^$*+?()\\[\\]{}|\\\\])", "\\\\$1"))
+        .collect(Collectors.joining("|"));
+
+    if (termPattern.isEmpty()) return;
+
+    String regex = "(^|\\\\W)(" + termPattern + ")(\\\\W|$)";
+
+    query.append("      # --- TIER 1: SEMANTIC FOODON EXCLUSION ---\n");
+    query.append("      # Traverses the ontology to remove subclasses of forbidden items\n");
+    query.append("      FILTER NOT EXISTS {\n");
+    query.append("        ?recipe heals:uses/heals:ing_name ?name .\n");
+    query.append("        ?name owl:equivalentClass ?foodOnClass .\n");
+    query.append("        FILTER(STRSTARTS(STR(?foodOnClass), \"http://purl.obolibrary.org/obo/FOODON_\"))\n");
+    query.append("\n");
+    query.append("        ?foodOnClass rdfs:subClassOf* ?parentClass .\n");
+    query.append("        FILTER(STRSTARTS(STR(?parentClass), \"http://purl.obolibrary.org/obo/FOODON_\"))\n");
+    query.append("\n");
+    query.append("        OPTIONAL {\n");
+    query.append("          ?parentClass rdfs:label ?foLabel .\n");
+    query.append("          FILTER(LANG(?foLabel) = \"\" || LANGMATCHES(LANG(?foLabel), \"en\"))\n");
+    query.append("        }\n");
+    query.append("        OPTIONAL { ?parentClass oboInOwl:hasSynonym ?foSyn . }\n");
+    query.append("\n");
+    query.append("        FILTER(\n");
+    query.append("          REGEX(LCASE(STR(?foLabel)), \"").append(regex).append("\") ||\n");
+    query.append("          REGEX(LCASE(STR(?foSyn)), \"").append(regex).append("\")\n");
+    query.append("        )\n");
+    query.append("      }\n\n");
     }
 
 
-    public List<RecipeCandidate> filterByNutrientCaps(List<RecipeCandidate> recipes, List<NutrientCap> caps) {
-    if (caps == null || caps.isEmpty()) return recipes;
+    private List<RecipeCandidate> enforceMedicalCaps(List<RecipeCandidate> candidates, MedicalManifest manifest) {
+    if (manifest.constraints() == null || manifest.constraints().nutrientCaps() == null || manifest.constraints().nutrientCaps().isEmpty()) {
+        return candidates;
+    }
 
-    return recipes.stream()
-            .filter(recipe -> withinCaps(recipe, caps))
+    return candidates.stream()
+            .filter(recipe -> isRecipeSafe(recipe, manifest.constraints().nutrientCaps()))
+            // Still sorting by a preference, e.g., protein-dense or low-calorie
+            .sorted(Comparator.comparingDouble(RecipeCandidate::getCalories))
             .collect(Collectors.toList());
 }
 
-private boolean withinCaps(RecipeCandidate recipe, List<NutrientCap> caps) {
+/**
+ * Validates a single recipe against ALL active medical nutrient caps.
+ */
+private boolean isRecipeSafe(RecipeCandidate recipe, List<NutrientCap> caps) {
+    double servings = resolveServings(recipe);
+
     for (NutrientCap cap : caps) {
-        if (cap == null || cap.nutrient() == null) continue;
+        double batchValue = getMacroValueByName(recipe, cap.nutrient());
+        double servingValue = batchValue / servings;
 
-        String key = cap.nutrient().trim().toLowerCase();
-        double value = resolveNutrientValue(recipe, key);
-
-        if (Double.isNaN(value)) continue;
-
-        double normalized = normalizeUnit(value, key, cap.unit());
-
-        if (normalized > cap.maxValue()) return false;
+        // If even ONE nutrient exceeds the limit, the recipe is discarded
+        if (servingValue > cap.maxValue()) {
+            System.out.println("Discarding " + recipe.getLabel() + " due to " + cap.nutrient() + " limit.");
+            return false;
+        }
     }
     return true;
 }
 
-private double resolveNutrientValue(RecipeCandidate recipe, String key) {
-    if (key.equals("carbohydrate, by difference")) return recipe.getCarbs();
-    if (key.equals("sodium, na") || key.equals("sodium")) return recipe.getSodium();
-    if (key.contains("sugars, total")) return recipe.getSugar();
-    if (key.equals("energy")) return recipe.getCalories();
-    if (key.equals("protein")) return recipe.getProtein();
-    if (key.equals("total lipid (fat)") || key.equals("fat")) return recipe.getFat();
-    return Double.NaN;
+/**
+ * Helper to map the Nutrient string name from the Medical Manifest 
+ * to the actual data fields in our RecipeCandidate.
+ */
+private double getMacroValueByName(RecipeCandidate recipe, String nutrientName) {
+    String name = nutrientName.toLowerCase();
+
+    if (name.contains("energy") || name.contains("calories")) return recipe.getCalories();
+    if (name.contains("protein")) return recipe.getProtein();
+    if (name.contains("carbohydrate") || name.contains("carb")) return recipe.getCarbs();
+    if (name.contains("added") && name.contains("sugar")) return recipe.getAddedSugar();
+    if (name.contains("sugar")) return recipe.getSugar();
+    if (name.contains("fat") || name.contains("lipid")) return recipe.getFat();
+    if (name.contains("sodium")) return recipe.getSodium();
+
+    return 0.0; // Default if nutrient isn't tracked in our local model
 }
 
-private double normalizeUnit(double value, String nutrientKey, String unit) {
-    if (unit == null) return value;
-
-    String u = unit.trim().toLowerCase();
-    boolean baseIsMg = nutrientKey.startsWith("sodium");
-
-    if (baseIsMg && u.equals("g")) return value / 1000.0;
-    if (!baseIsMg && u.equals("mg")) return value * 1000.0;
-
-    return value;
+private double resolveServings(RecipeCandidate recipe) {
+    Double servings = recipe.getServings();
+    if (servings != null && servings > 0) {
+        return servings;
+    }
+    return 4.0;
 }
 
+private void applyEstimatedServings(List<RecipeCandidate> recipes) {
+    if (!servingsLlmEnabled || recipes == null || recipes.isEmpty()) return;
 
-    private void injectUsdaNutrientCaps(StringBuilder query, List<NutrientCap> caps) {
-        if (caps == null || caps.isEmpty()) return;
+    int remaining = maxServingsEstimates;
 
-        query.append("  # --- USDA NUTRIENT TRACKING ---\n");
-        query.append("  ?name owl:equivalentClass ?usdaItem .\n");
+    for (RecipeCandidate recipe : recipes) {
+        if (remaining <= 0) break;
 
-        int counter = 1;
-        for (NutrientCap cap : caps) {
-            String nutrientName = cap.nutrient();
+        Double servings = recipe.getServings();
+        if (servings != null && servings > 0) continue;
 
-            // Generate unique variable names for each nutrient requested
-            String nutNode = "?nutNode" + counter;
-            String nutVal = "?nutVal" + counter;
-
-            query.append("  OPTIONAL {\n");
-            query.append("    ?usdaItem usda:hasNutrient ").append(nutNode).append(" .\n");
-            query.append("    ").append(nutNode).append(" usda:nutrientName \"").append(nutrientName).append("\" ;\n");
-            query.append("              usda:nutrientValue ").append(nutVal).append(" .\n");
-            query.append("  }\n");
-            counter++;
+        Double estimated = servingsEstimatorService.estimateServings(recipe);
+        if (estimated != null && estimated > 0) {
+            recipe.setServings(estimated);
         }
-        query.append("\n");
+
+        remaining--;
     }
+}
 
-
-    // Query template:
-
-//    PREFIX heals: <http://idea.rpi.edu/heals/kb/>
-//    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-//    PREFIX owl: <http://www.w3.org/2002/07/owl#>
-//    PREFIX usda: <http://example.org/usda/>
-//    PREFIX foodon: <http://purl.obolibrary.org/obo/>
-//
-//    SELECT ?recipe ?recipeLabel
-//    WHERE {
-//  ?recipe a heals:recipe ; rdfs:label ?recipeLabel .
-//                ?recipe heals:uses ?use .
-//                ?use heals:ing_name ?name .
-//
-//  # --- FOODON HARD EXCLUSIONS ---
-//  # This block physically removes any recipe containing a subclass of the forbidden items.
-//                FILTER NOT EXISTS {
-//    ?name owl:equivalentClass ?foodOnClass .
-//                    ?foodOnClass rdfs:subClassOf* ?parentClass .
-//                    ?parentClass rdfs:label ?foLabel .
-//                    FILTER(LCASE(STR(?foLabel)) IN ("dairy product", "added sugar", "refined grain product", "sugar-sweetened beverage"))
-//        }
-//
-//  # --- USDA NUTRIENT TRACKING ---
-//  # This block fetches the exact numerical values for the exact nutrients the doctor cares about.
-//                ?name owl:equivalentClass ?usdaItem .
-//                OPTIONAL {
-//    ?usdaItem usda:hasNutrient ?nutNode1 .
-//                    ?nutNode1 usda:nutrientName "Carbohydrate, by difference" ;
-//            usda:nutrientValue ?nutVal1 .
-//        }
-//        OPTIONAL {
-//    ?usdaItem usda:hasNutrient ?nutNode2 .
-//                    ?nutNode2 usda:nutrientName "Sodium" ;
-//            usda:nutrientValue ?nutVal2 .
-//        }
-//    }
-//    GROUP BY ?recipe ?recipeLabel
-//    LIMIT 50
-
-    public List<RecipeCandidate>buildUnconstrainedQuery(){
-        return null;
-    }
 }
