@@ -4,6 +4,7 @@ import lombok.Data;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 @Data
 public class RecipeCandidate {
     private String uri;
@@ -16,8 +17,15 @@ public class RecipeCandidate {
     private double carbs;
     private double fat;
     private double sugar;
-    private double addedSugar;
     private double sodium;
+    private Map<String, String> macroUnits = Map.of(
+            "calories", "kcal per serving",
+            "protein", "g per serving",
+            "carbs", "g per serving",
+            "fat", "g per serving",
+            "sugar", "g per serving",
+            "sodium", "mg per serving"
+    );
     private List<IngredientUse> ingredients = new ArrayList<>();
     public RecipeCandidate(String uri, String label, List<String> usdaIngredientIds) {
         this.uri = uri;

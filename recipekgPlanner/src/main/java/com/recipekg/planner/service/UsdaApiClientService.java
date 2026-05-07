@@ -23,8 +23,8 @@ public class UsdaApiClientService {
     @Value("${servings.default:4.0}")
     private double defaultServings;
 
-    @Value("${servings.estimated-calories-per-serving:500.0}")
-    private double estimatedCaloriesPerServing;
+    @Value("${servings.estimated-grams-per-serving:250.0}")
+    private double estimatedGramsPerServing;
 
     @Value("${servings.estimated-min:1.0}")
     private double minEstimatedServings;
@@ -61,7 +61,8 @@ public class UsdaApiClientService {
         for (RecipeCandidate recipe : recipes) {
             Set<String> seenIngredients = new HashSet<>();
             recipe.getIngredients().removeIf(ing -> !seenIngredients.add(buildIngredientKey(ing)));
-            double totalCal = 0, totalProt = 0, totalCarbs = 0, totalFat = 0, totalSugar=0, totalSodium=0, totalAddedSugar=0;
+            double totalCal = 0, totalProt = 0, totalCarbs = 0, totalFat = 0, totalSugar=0, totalSodium=0;
+            double totalGrams = 0;
             StringBuilder combinedUsdaText = new StringBuilder();
 
             // Iterate over the ACTUAL INGREDIENT USES to get quantity and unit!
@@ -80,21 +81,24 @@ public class UsdaApiClientService {
                             continue;
                         }
 
-                        // Calculate the Multiplier!
                         double parsedQty = parseQuantity(use.getQuantity());
                         if (parsedQty <= 0) {
                             combinedUsdaText.append(usdaData.description()).append(" ");
                             continue;
                         }
                         double multiplier = calculateMultiplier(parsedQty, use.getUnit(), use.getName(), usdaData.portions());
+                        if (multiplier <= 0) {
+                            combinedUsdaText.append(usdaData.description()).append(" ");
+                            continue;
+                        }
 
                         // Apply the multiplier to the 100g baseline macros
+                        totalGrams += multiplier * 100.0;
                         totalCal += macros.calories() * multiplier;
                         totalProt += macros.protein() * multiplier;
                         totalCarbs += macros.carbs() * multiplier;
                         totalFat += macros.fat() * multiplier;
                         totalSugar += macros.sugar() * multiplier;
-                        totalAddedSugar += macros.addedSugar() * multiplier;
                         totalSodium += macros.sodium() * multiplier;
 
                         combinedUsdaText.append(usdaData.description()).append(" ");
@@ -104,7 +108,7 @@ public class UsdaApiClientService {
                 }
             }
 
-            double servings = resolveServings(recipe, totalCal);
+            double servings = resolveServings(recipe, totalGrams);
             recipe.setServings(servings);
 
             recipe.setCalories(totalCal / servings);
@@ -112,7 +116,6 @@ public class UsdaApiClientService {
             recipe.setCarbs(totalCarbs / servings);
             recipe.setFat(totalFat / servings);
             recipe.setSugar(totalSugar / servings);
-            recipe.setAddedSugar(totalAddedSugar / servings);
             recipe.setSodium(totalSodium / servings);
             recipe.setUsdaIngredientText(combinedUsdaText.toString().trim());
         }
@@ -151,10 +154,10 @@ public class UsdaApiClientService {
     }
 
     private MacroProfile extractMacros(JsonNode nutrients) {
-        double calKcal = 0, calKj = 0, prot = 0, carbs = 0, fat = 0, sugar = 0, sodium = 0, addedSugar = 0;
+        double calKcal = 0, calKj = 0, prot = 0, carbs = 0, fat = 0, sugar = 0, sodium = 0;
 
         if (nutrients == null || !nutrients.isArray()) {
-            return new MacroProfile(0, 0, 0, 0, 0, 0, 0);
+            return new MacroProfile(0, 0, 0, 0, 0, 0);
         }
 
         for (JsonNode nut : nutrients) {
@@ -175,7 +178,6 @@ public class UsdaApiClientService {
                 case "205" -> carbs = amount;
                 case "204" -> fat = amount;
                 case "269" -> sugar = amount;
-                case "539" -> addedSugar = amount;
                 case "307" -> sodium = amount;
                 default -> {
                     // Ignore nutrient group headings and non-macro nutrients.
@@ -184,7 +186,7 @@ public class UsdaApiClientService {
         }
 
         double calories = calKcal > 0 ? calKcal : calKj * 0.239005736;
-        return new MacroProfile(calories, prot, carbs, fat, sugar, addedSugar, sodium);
+        return new MacroProfile(calories, prot, carbs, fat, sugar, sodium);
     }
 
     private String nutrientNumber(JsonNode nutrient) {
@@ -269,11 +271,12 @@ private String normalizeUnit(String unit) {
     return UNIT_MAP.getOrDefault(cleanUnit, cleanUnit);
 }
 
+
+// How many 100g (usda returns macros per 100g) units
 private double calculateMultiplier(double quantity, String unit, String ingredientName, JsonNode portions) {
     if (quantity <= 0) return 0.0;
     double safeQty = quantity;
 
-    // Use the new normalization logic here!
     String normalizedLocalUnit = normalizeUnit(unit);
 
     if ("g".equals(normalizedLocalUnit)) return safeQty / 100.0;
@@ -396,7 +399,66 @@ private double resolvePortionMultiplier(String normalizedUnit, double quantity, 
         }
     }
 
+    if (best == null && hasExplicitUnit) {
+        double convertedVolumeMultiplier = resolveConvertedVolumeMultiplier(normalizedUnit, quantity, portions);
+        if (convertedVolumeMultiplier > 0) return convertedVolumeMultiplier;
+    }
+
     return best == null ? 0.0 : (best.gramsPerRecipeUnit() * quantity) / 100.0;
+}
+
+private double resolveConvertedVolumeMultiplier(String normalizedUnit, double quantity, JsonNode portions) {
+    double localTeaspoons = teaspoonsForVolumeUnit(normalizedUnit);
+    if (localTeaspoons <= 0 || portions == null || !portions.isArray()) return 0.0;
+
+    PortionMatch best = null;
+    for (JsonNode portion : portions) {
+        double gramWeight = portion.path("gramWeight").asDouble(0.0);
+        if (gramWeight <= 0) continue;
+
+        double portionAmount = portion.path("amount").asDouble(1.0);
+        if (portionAmount <= 0) portionAmount = 1.0;
+
+        String combined = normalizeModifier(String.join(" ",
+                portion.path("modifier").asText(""),
+                portion.path("measureUnit").path("name").asText(""),
+                portion.path("measureUnit").path("abbreviation").asText("")
+        ));
+
+        double portionTeaspoons = teaspoonsForPortion(combined, portionAmount);
+        if (portionTeaspoons <= 0) continue;
+
+        int sequenceNumber = portion.path("sequenceNumber").asInt(Integer.MAX_VALUE);
+        double gramsPerLocalUnit = gramWeight * (localTeaspoons / portionTeaspoons);
+        int score = 100 + Math.max(0, 10 - sequenceNumber);
+
+        PortionMatch candidate = new PortionMatch(score, gramsPerLocalUnit, sequenceNumber);
+        if (best == null
+                || candidate.score() > best.score()
+                || (candidate.score() == best.score() && candidate.sequenceNumber() < best.sequenceNumber())) {
+            best = candidate;
+        }
+    }
+
+    return best == null ? 0.0 : (best.gramsPerRecipeUnit() * quantity) / 100.0;
+}
+
+private double teaspoonsForPortion(String combined, double portionAmount) {
+    if (containsUnitToken(combined, "tsp")) return portionAmount;
+    if (containsUnitToken(combined, "tbsp")) return portionAmount * 3.0;
+    if (containsUnitToken(combined, "floz")) return portionAmount * 6.0;
+    if (containsUnitToken(combined, "cup")) return portionAmount * 48.0;
+    return 0.0;
+}
+
+private double teaspoonsForVolumeUnit(String unit) {
+    return switch (unit) {
+        case "tsp" -> 1.0;
+        case "tbsp" -> 3.0;
+        case "floz" -> 6.0;
+        case "cup" -> 48.0;
+        default -> 0.0;
+    };
 }
 
 private int scorePortion(
@@ -425,7 +487,7 @@ private int scorePortion(
     boolean slicedOrPrepared = containsAny(combined, "slice", "sliced", "ring", "rings", "chopped", "diced", "minced");
     boolean measured = containsAny(combined, "cup", "tbsp", "tsp", "floz", "oz", "g", "kg", "ml", "l");
     boolean ingredientMentionsCount = ingredientMentionsAny(ingredientName,
-            "slice", "piece", "clove", "cube", "stalk", "kernel", "sprig", "leaf", "bunch");
+            "slice", "piece", "strip", "patty", "link", "clove", "cube", "stalk", "kernel", "sprig", "leaf", "bunch");
 
     if (containsAny(combined, "serving", "container", "package", "packet", "can", "bottle", "jar")) score += 85;
     if (containsAny(combined, "whole", "fruit", "item")) score += 80;
@@ -433,9 +495,11 @@ private int scorePortion(
     if (!slicedOrPrepared && !measured && containsAny(combined, "medium")) score += 78;
     if (!slicedOrPrepared && !measured && containsAny(combined, "large")) score += 72;
     if (!slicedOrPrepared && !measured && containsAny(combined, "small")) score += 65;
-    if (containsAny(combined, "clove", "cube", "stalk", "kernel", "sprig", "leaf", "bunch")) score += ingredientMentionsCount ? 75 : 35;
+    if (containsAny(combined, "strip", "patty", "link", "clove", "cube", "stalk", "kernel", "sprig", "leaf", "bunch")) {
+        score += ingredientMentionsCount ? 75 : 60;
+    }
     if (slicedOrPrepared) score += ingredientMentionsCount ? 70 : 35;
-    if (containsIngredientToken(combined, ingredientName)) score += 30;
+    if (containsIngredientToken(combined, ingredientName)) score += 95;
 
     // With no local unit, quantity means "number of USDA portions".
     // A 12 fl oz beer portion is a plausible portion; a 1 fl oz portion is usually only a sub-unit.
@@ -550,13 +614,13 @@ private boolean isBlank(String value) {
     return value == null || value.isBlank();
 }
 
-private double resolveServings(RecipeCandidate recipe, double totalCalories) {
+private double resolveServings(RecipeCandidate recipe, double totalGrams) {
     Double servings = recipe.getServings();
     if (servings != null && servings > 0) {
         return servings;
     }
 
-    double estimated = estimateServingsFromCalories(totalCalories);
+    double estimated = estimateServingsFromWeight(totalGrams);
     if (estimated > 0) {
         return estimated;
     }
@@ -564,12 +628,12 @@ private double resolveServings(RecipeCandidate recipe, double totalCalories) {
     return defaultServings > 0 ? defaultServings : 4.0;
 }
 
-private double estimateServingsFromCalories(double totalCalories) {
-    if (totalCalories <= 0 || estimatedCaloriesPerServing <= 0) {
+private double estimateServingsFromWeight(double totalGrams) {
+    if (totalGrams <= 0 || estimatedGramsPerServing <= 0) {
         return 0.0;
     }
 
-    double rawEstimate = totalCalories / estimatedCaloriesPerServing;
+    double rawEstimate = totalGrams / estimatedGramsPerServing;
     double min = minEstimatedServings > 0 ? minEstimatedServings : 1.0;
     double max = maxEstimatedServings >= min ? maxEstimatedServings : 12.0;
 
@@ -584,7 +648,6 @@ private record MacroProfile(
         double carbs,
         double fat,
         double sugar,
-        double addedSugar,
         double sodium
 ) {}
 

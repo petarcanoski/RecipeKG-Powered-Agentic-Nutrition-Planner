@@ -58,7 +58,7 @@ public class FoodScientistService {
     StringBuilder query = new StringBuilder();
     query.append(SPARQL_PREFIXES).append("\n");
 
-    query.append("SELECT DISTINCT ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit (SAMPLE(?usdaUrl) AS ?usdaUrl) (SAMPLE(?servings) AS ?servings) \n");
+    query.append("SELECT DISTINCT ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit (SAMPLE(?usdaUrl) AS ?usdaUrl) \n");
     query.append("WHERE {\n");
 
     query.append("  {\n");
@@ -74,16 +74,6 @@ public class FoodScientistService {
     query.append("    ORDER BY RAND()\n");
     query.append("    LIMIT 50\n");
     query.append("  }\n\n");
-
-    query.append("  OPTIONAL { ?recipe heals:servings ?servings0 }\n");
-    query.append("  OPTIONAL { ?recipe heals:servingSize ?servings1 }\n");
-    query.append("  OPTIONAL { ?recipe heals:recipeYield ?servings2 }\n");
-    query.append("  OPTIONAL { ?recipe heals:yield ?servings3 }\n");
-    query.append("  OPTIONAL { ?recipe heals:serves ?servings4 }\n");
-    query.append("  OPTIONAL { ?recipe <http://schema.org/recipeYield> ?servings5 }\n");
-    query.append("  OPTIONAL { ?recipe <https://schema.org/recipeYield> ?servings6 }\n");
-    query.append("  BIND(COALESCE(?servings0, ?servings1, ?servings2, ?servings3, ?servings4, ?servings5, ?servings6) AS ?servings)\n");
-    query.append("\n");
 
     query.append("  ?recipe heals:uses ?use .\n");
     query.append("  ?use heals:ing_name ?ingName .\n");
@@ -212,7 +202,6 @@ private double getMacroValueByName(RecipeCandidate recipe, String nutrientName) 
     if (name.contains("energy") || name.contains("calories")) return recipe.getCalories();
     if (name.contains("protein")) return recipe.getProtein();
     if (name.contains("carbohydrate") || name.contains("carb")) return recipe.getCarbs();
-    if (name.contains("added") && name.contains("sugar")) return recipe.getAddedSugar();
     if (name.contains("sugar")) return recipe.getSugar();
     if (name.contains("fat") || name.contains("lipid")) return recipe.getFat();
     if (name.contains("sodium")) return recipe.getSodium();

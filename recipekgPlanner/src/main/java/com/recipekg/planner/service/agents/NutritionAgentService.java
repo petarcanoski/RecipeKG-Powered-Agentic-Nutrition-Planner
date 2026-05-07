@@ -13,7 +13,6 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -24,7 +23,6 @@ public class NutritionAgentService {
     private final RecipeKGService recipeKGService;
     private final SparqlResultParserService sparqlResultParserService;
     private final MealValidatorService mealValidatorService;
-    private final ProgressBrainService progressBrain;
     private final MacroBrainService macroBrainService;
     private final VarietyBrainService varietyBrainService;
     private final DiseaseBrainService diseaseBrain;
@@ -32,10 +30,7 @@ public class NutritionAgentService {
     @Value("${gemini.api-key}")
     private String apiKey;
 
-    private String extractName(String uri) {
-        return uri.substring(uri.lastIndexOf("-") + 1)
-                .replace("%20", " ");
-    }
+    
 
     private String callGemini(String prompt) {
 
