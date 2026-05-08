@@ -1,15 +1,20 @@
 package com.recipekg.planner.service;
 
 import com.recipekg.planner.model.MedicalManifest;
+import com.recipekg.planner.model.PerformanceManifest;
 import com.recipekg.planner.model.RecipeCandidate;
 import com.recipekg.planner.model.UserProfile;
 import com.recipekg.planner.model.NutrientCap;
 import com.recipekg.planner.repository.GraphDbRepository;
 import com.recipekg.planner.response.PantryResponse;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -18,10 +23,20 @@ public class FoodScientistService {
 
     private final GraphDbRepository graphDbRepository;
     private final UsdaApiClientService usdaApiClientService;
+    private final PerformanceScoringService performanceScoringService;
 
-    public FoodScientistService(GraphDbRepository graphDbRepository, UsdaApiClientService usdaApiClientService) {
+    @Value("${recipe.candidates.pool-limit:500}")
+    private int candidatePoolLimit;
+
+    @Value("${recipe.candidates.enrichment-limit:100}")
+    private int enrichmentLimit;
+
+    public FoodScientistService(GraphDbRepository graphDbRepository,
+                                UsdaApiClientService usdaApiClientService,
+                                PerformanceScoringService performanceScoringService) {
         this.graphDbRepository = graphDbRepository;
         this.usdaApiClientService = usdaApiClientService;
+        this.performanceScoringService = performanceScoringService;
     }
 
     private static final String SPARQL_PREFIXES = """
@@ -34,10 +49,19 @@ public class FoodScientistService {
             """;
 
     public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest) {
+        return fetchSafePantry(profile, manifest, null);
+    }
+
+    public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest, PerformanceManifest performanceManifest) {
         String sparqlQuery = buildSafeCandidateQuery(manifest);
 
-        // --- TIER 0 & 1: Fetch 100 raw recipes from GraphDB (Allergen Filtered) ---
+        // --- TIER 0 & 1: Fetch a broad, medically filtered candidate pool from GraphDB ---
         List<RecipeCandidate> results = graphDbRepository.executeSparql(sparqlQuery);
+
+        // --- TIER 1b: Cheap local ranking before expensive USDA macro enrichment ---
+        results = preRankCandidates(results, performanceManifest).stream()
+                .limit(Math.max(1, enrichmentLimit))
+                .collect(Collectors.toList());
 
         // --- TIER 2a: Volumetric Macro Calculation ---
         // Populates per-serving macros using USDA per-100g data and deterministic serving estimates.
@@ -45,13 +69,15 @@ public class FoodScientistService {
 
         // --- TIER 2b: Generic Nutrient Cap Filtering ---
         // Dynamically enforces every nutrient limit in the manifest against per-serving macros.
-        if ("CONSTRAINED".equalsIgnoreCase(manifest.status())) {
+        if (manifest != null && "CONSTRAINED".equalsIgnoreCase(manifest.status())) {
             results = enforceMedicalCaps(results, manifest);
         }
 
-    
+        // --- TIER 3: Performance scoring. Medical safety remains the hard gate. ---
+        results = performanceScoringService.scoreAndRank(results, performanceManifest);
+        results = keepDiverseLabels(results);
 
-        return new PantryResponse(sparqlQuery, results, manifest);
+        return new PantryResponse(sparqlQuery, results, manifest, performanceManifest);
     }
 
    public String buildSafeCandidateQuery(MedicalManifest manifest) {
@@ -62,17 +88,23 @@ public class FoodScientistService {
     query.append("WHERE {\n");
 
     query.append("  {\n");
-    query.append("    SELECT DISTINCT ?recipe ?recipeLabel WHERE {\n");
+    query.append("    SELECT ?recipe ?recipeLabel (COUNT(DISTINCT ?usdaItem) AS ?mappedCount) WHERE {\n");
     query.append("      ?recipe a heals:recipe ; rdfs:label ?recipeLabel .\n");
 
-    if (manifest.constraints() != null) {
+    if (manifest != null && manifest.constraints() != null) {
         injectKeywordExclusions(query, manifest.constraints().hardExclusions());
         injectSemanticExclusions(query, manifest.constraints().hardExclusions());
     }
 
+    query.append("      OPTIONAL {\n");
+    query.append("        ?recipe heals:uses/heals:ing_name ?candidateIng .\n");
+    query.append("        ?candidateIng owl:equivalentClass ?usdaItem .\n");
+    query.append("        FILTER(CONTAINS(STR(?usdaItem), \"fdc.nal.usda.gov\"))\n");
+    query.append("      }\n");
     query.append("    }\n");
-    query.append("    ORDER BY RAND()\n");
-    query.append("    LIMIT 50\n");
+    query.append("    GROUP BY ?recipe ?recipeLabel\n");
+    query.append("    ORDER BY DESC(?mappedCount) (LCASE(STR(?recipeLabel)))\n");
+    query.append("    LIMIT ").append(Math.max(1, candidatePoolLimit)).append("\n");
     query.append("  }\n\n");
 
     query.append("  ?recipe heals:uses ?use .\n");
@@ -90,6 +122,81 @@ public class FoodScientistService {
     query.append("GROUP BY ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit\n");
 
     return query.toString();
+}
+
+private List<RecipeCandidate> preRankCandidates(List<RecipeCandidate> candidates, PerformanceManifest performanceManifest) {
+    if (candidates == null || candidates.isEmpty()) return candidates;
+
+    return candidates.stream()
+            .sorted(Comparator.comparingDouble((RecipeCandidate recipe) -> cheapCandidateScore(recipe, performanceManifest)).reversed())
+            .collect(Collectors.toList());
+}
+
+private double cheapCandidateScore(RecipeCandidate recipe, PerformanceManifest performanceManifest) {
+    double score = 0.0;
+    score += recipe.getUsdaIngredientIds().size() * 8.0;
+
+    int ingredientCount = recipe.getIngredients().size();
+    if (ingredientCount > 0) score += Math.min(ingredientCount, 12);
+
+    for (var ingredient : recipe.getIngredients()) {
+        boolean hasUsda = ingredient.getUsdaUrl() != null && !ingredient.getUsdaUrl().isBlank();
+        boolean hasQuantity = ingredient.getQuantity() != null && !ingredient.getQuantity().isBlank();
+        boolean hasUnit = ingredient.getUnit() != null && !ingredient.getUnit().isBlank();
+
+        if (hasUsda) score += 2.0;
+        if (hasQuantity && ingredient.getQuantity().matches(".*\\d.*")) score += 3.0;
+        if (hasQuantity && hasUnit) score += 1.0;
+        if (!hasQuantity) score -= 1.0;
+        if (hasQuantity && !hasUnit) score -= 0.5;
+    }
+
+    score += goalHintScore(recipe, performanceManifest);
+    return score;
+}
+
+private double goalHintScore(RecipeCandidate recipe, PerformanceManifest performanceManifest) {
+    if (performanceManifest == null || performanceManifest.goalStatus() == null) return 0.0;
+
+    String goal = performanceManifest.goalStatus().toUpperCase(Locale.ROOT);
+    String text = (recipe.getLabel() + " " + recipe.getIngredients().stream()
+            .map(ingredient -> ingredient.getName() == null ? "" : ingredient.getName())
+            .collect(Collectors.joining(" "))).toLowerCase(Locale.ROOT);
+
+    if ("HYPERTROPHY".equals(goal)) {
+        return containsAnyLoose(text, "chicken", "beef", "turkey", "salmon", "tuna", "shrimp", "egg", "bean", "lentil") ? 8.0 : 0.0;
+    }
+    if ("FAT_LOSS".equals(goal)) {
+        return containsAnyLoose(text, "salad", "chicken", "fish", "tuna", "vegetable", "bean", "lentil") ? 6.0 : 0.0;
+    }
+    if ("ENDURANCE".equals(goal)) {
+        return containsAnyLoose(text, "rice", "potato", "pasta", "oat", "bean", "lentil", "fruit") ? 6.0 : 0.0;
+    }
+
+    return 0.0;
+}
+
+private boolean containsAnyLoose(String text, String... terms) {
+    if (text == null || text.isBlank()) return false;
+    for (String term : terms) {
+        if (text.contains(term)) return true;
+    }
+    return false;
+}
+
+private List<RecipeCandidate> keepDiverseLabels(List<RecipeCandidate> candidates) {
+    if (candidates == null || candidates.isEmpty()) return candidates;
+
+    Map<String, RecipeCandidate> byLabel = new LinkedHashMap<>();
+    for (RecipeCandidate candidate : candidates) {
+        byLabel.putIfAbsent(normalizeLabel(candidate.getLabel()), candidate);
+    }
+    return byLabel.values().stream().toList();
+}
+
+private String normalizeLabel(String label) {
+    if (label == null) return "";
+    return label.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
 }
 
 
@@ -169,8 +276,6 @@ private List<String> sanitizeExclusions(List<String> exclusions) {
 
     return candidates.stream()
             .filter(recipe -> isRecipeSafe(recipe, manifest.constraints().nutrientCaps()))
-            // Still sorting by a preference, e.g., protein-dense or low-calorie
-            .sorted(Comparator.comparingDouble(RecipeCandidate::getCalories))
             .collect(Collectors.toList());
 }
 

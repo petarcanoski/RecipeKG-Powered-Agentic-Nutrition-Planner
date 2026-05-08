@@ -10,9 +10,12 @@ import org.eclipse.rdf4j.repository.RepositoryConnection;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 public class GraphDbRepository {
@@ -26,6 +29,7 @@ public class GraphDbRepository {
 
     public List<RecipeCandidate> executeSparql(String sparqlQuery) {
     Map<String, RecipeCandidate> byRecipe = new LinkedHashMap<>();
+    Map<String, Map<String, IngredientAccumulator>> ingredientsByRecipe = new LinkedHashMap<>();
 
     try (RepositoryConnection conn = db.getConnection()) {
         TupleQuery query = conn.prepareTupleQuery(sparqlQuery);
@@ -54,15 +58,16 @@ public class GraphDbRepository {
                 String qty = row.hasBinding("qty") ? row.getValue("qty").stringValue() : "";
                 String unit = row.hasBinding("unit") ? row.getValue("unit").stringValue() : "";
                 String usdaUrl = row.hasBinding("usdaUrl") ? row.getValue("usdaUrl").stringValue() : "";
+                String useUri = row.hasBinding("use") ? row.getValue("use").stringValue() : "";
 
                 if (!ingNameUri.isEmpty()) {
                     String name = !ingLabel.isEmpty() ? ingLabel : ingNameUri;
-                    candidate.getIngredients().add(new IngredientUse(name, qty, unit, usdaUrl));
-                }
-
-                if (usdaUrl != null && !usdaUrl.isBlank()
-                        && !candidate.getUsdaIngredientIds().contains(usdaUrl)) {
-                    candidate.getUsdaIngredientIds().add(usdaUrl);
+                    String ingredientKey = !useUri.isBlank() ? useUri : ingNameUri + "|" + usdaUrl;
+                    Map<String, IngredientAccumulator> recipeIngredients =
+                            ingredientsByRecipe.computeIfAbsent(uri, ignored -> new LinkedHashMap<>());
+                    IngredientAccumulator accumulator =
+                            recipeIngredients.computeIfAbsent(ingredientKey, ignored -> new IngredientAccumulator(name, usdaUrl));
+                    accumulator.add(name, qty, unit, usdaUrl);
                 }
             }
         }
@@ -70,7 +75,77 @@ public class GraphDbRepository {
         throw new RuntimeException("Failed to execute SPARQL query via RDF4J", e);
     }
 
+    attachCollapsedIngredients(byRecipe, ingredientsByRecipe);
+
     return new ArrayList<>(byRecipe.values());
+}
+
+private void attachCollapsedIngredients(Map<String, RecipeCandidate> byRecipe,
+                                        Map<String, Map<String, IngredientAccumulator>> ingredientsByRecipe) {
+    for (Map.Entry<String, RecipeCandidate> entry : byRecipe.entrySet()) {
+        RecipeCandidate candidate = entry.getValue();
+        candidate.getIngredients().clear();
+        candidate.getUsdaIngredientIds().clear();
+
+        Map<String, IngredientAccumulator> ingredientMap = ingredientsByRecipe.get(entry.getKey());
+        if (ingredientMap == null) continue;
+
+        for (IngredientAccumulator accumulator : ingredientMap.values()) {
+            IngredientUse ingredient = accumulator.toIngredientUse();
+            candidate.getIngredients().add(ingredient);
+
+            String usdaUrl = ingredient.getUsdaUrl();
+            if (usdaUrl != null && !usdaUrl.isBlank()
+                    && !candidate.getUsdaIngredientIds().contains(usdaUrl)) {
+                candidate.getUsdaIngredientIds().add(usdaUrl);
+            }
+        }
+    }
+}
+
+private QuantityUnitPair chooseQuantityUnitPair(Set<QuantityUnitPair> pairs) {
+    if (pairs == null || pairs.isEmpty()) {
+        return new QuantityUnitPair("", "");
+    }
+
+    return pairs.stream()
+            .min(Comparator
+                    .comparingDouble((QuantityUnitPair pair) -> estimatedPairWeight(pair.quantity(), pair.unit()))
+                    .thenComparing(pair -> safeString(pair.quantity()))
+                    .thenComparing(pair -> safeString(pair.unit())))
+            .orElse(new QuantityUnitPair("", ""));
+}
+
+private double estimatedPairWeight(String quantity, String unit) {
+    if (quantity == null || quantity.isBlank()) return Double.MAX_VALUE;
+
+    double parsedQuantity = parseServings(quantity) == null ? 0.0 : parseServings(quantity);
+    if (parsedQuantity <= 0) return Double.MAX_VALUE;
+
+    return parsedQuantity * unitWeight(unit);
+}
+
+private double unitWeight(String unit) {
+    String normalized = unit == null ? "" : unit.toLowerCase().trim().replaceAll("[\\.,]+$", "");
+    normalized = normalized.replaceAll("\\s+", " ");
+
+    return switch (normalized) {
+        case "teaspoon", "teaspoons", "tsp", "tsps" -> 5.0;
+        case "tablespoon", "tablespoons", "tbsp", "tbs", "tbsps" -> 15.0;
+        case "cup", "cups", "c" -> 240.0;
+        case "fl oz", "fluid ounce", "fluid ounces", "floz" -> 30.0;
+        case "ounce", "ounces", "oz" -> 28.35;
+        case "pound", "pounds", "lb", "lbs" -> 453.59;
+        case "gram", "grams", "g" -> 1.0;
+        case "kilogram", "kilograms", "kg" -> 1000.0;
+        case "milliliter", "milliliters", "ml" -> 1.0;
+        case "liter", "liters", "litre", "litres", "l" -> 1000.0;
+        default -> 1.0;
+    };
+}
+
+private String safeString(String value) {
+    return value == null ? "" : value.trim();
 }
 
 private Double parseServings(String raw) {
@@ -129,4 +204,32 @@ private double safeParseDouble(String value) {
         return 0.0;
     }
 }
+
+private class IngredientAccumulator {
+    private String name;
+    private String usdaUrl;
+    private final Set<QuantityUnitPair> pairs = new LinkedHashSet<>();
+
+    private IngredientAccumulator(String name, String usdaUrl) {
+        this.name = safeString(name);
+        this.usdaUrl = safeString(usdaUrl);
+    }
+
+    private void add(String name, String quantity, String unit, String usdaUrl) {
+        if (this.name.isBlank() && name != null) {
+            this.name = safeString(name);
+        }
+        if (this.usdaUrl.isBlank() && usdaUrl != null) {
+            this.usdaUrl = safeString(usdaUrl);
+        }
+        pairs.add(new QuantityUnitPair(safeString(quantity), safeString(unit)));
+    }
+
+    private IngredientUse toIngredientUse() {
+        QuantityUnitPair pair = chooseQuantityUnitPair(pairs);
+        return new IngredientUse(name, pair.quantity(), pair.unit(), usdaUrl);
+    }
+}
+
+private record QuantityUnitPair(String quantity, String unit) {}
 }

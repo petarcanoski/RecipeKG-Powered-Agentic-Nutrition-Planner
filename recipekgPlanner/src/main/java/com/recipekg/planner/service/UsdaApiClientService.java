@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class UsdaApiClientService {
@@ -19,6 +20,7 @@ public class UsdaApiClientService {
 
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper mapper = new ObjectMapper();
+    private final Map<String, UsdaFoodData> foodDataCache = new ConcurrentHashMap<>();
 
     @Value("${servings.default:4.0}")
     private double defaultServings;
@@ -67,44 +69,55 @@ public class UsdaApiClientService {
 
             // Iterate over the ACTUAL INGREDIENT USES to get quantity and unit!
             for (IngredientUse use : recipe.getIngredients()) {
-                if (use.getUsdaUrl() == null || use.getUsdaUrl().isEmpty()) continue;
+                if (use.getUsdaUrl() == null || use.getUsdaUrl().isEmpty()) {
+                    markUnresolved(use, "No USDA food mapping; ingredient skipped in macro calculation.");
+                    continue;
+                }
 
                 try {
                     String cleanId = use.getUsdaUrl().substring(use.getUsdaUrl().lastIndexOf('/') + 1).trim();
 
-                    if (dataDictionary.containsKey(cleanId)) {
-                        UsdaFoodData usdaData = dataDictionary.get(cleanId);
-                        MacroProfile macros = usdaData.macrosPer100g();
-
-                        if (isBlank(use.getQuantity())) {
-                            combinedUsdaText.append(usdaData.description()).append(" ");
-                            continue;
-                        }
-
-                        double parsedQty = parseQuantity(use.getQuantity());
-                        if (parsedQty <= 0) {
-                            combinedUsdaText.append(usdaData.description()).append(" ");
-                            continue;
-                        }
-                        double multiplier = calculateMultiplier(parsedQty, use.getUnit(), use.getName(), usdaData.portions());
-                        if (multiplier <= 0) {
-                            combinedUsdaText.append(usdaData.description()).append(" ");
-                            continue;
-                        }
-
-                        // Apply the multiplier to the 100g baseline macros
-                        totalGrams += multiplier * 100.0;
-                        totalCal += macros.calories() * multiplier;
-                        totalProt += macros.protein() * multiplier;
-                        totalCarbs += macros.carbs() * multiplier;
-                        totalFat += macros.fat() * multiplier;
-                        totalSugar += macros.sugar() * multiplier;
-                        totalSodium += macros.sodium() * multiplier;
-
-                        combinedUsdaText.append(usdaData.description()).append(" ");
+                    UsdaFoodData usdaData = dataDictionary.get(cleanId);
+                    if (usdaData == null) {
+                        markUnresolved(use, "USDA food data was not returned; ingredient skipped in macro calculation.");
+                        continue;
                     }
+
+                    MacroProfile macros = usdaData.macrosPer100g();
+
+                    if (isBlank(use.getQuantity())) {
+                        markUnresolved(use, "Missing quantity; ingredient skipped in macro calculation.");
+                        combinedUsdaText.append(usdaData.description()).append(" ");
+                        continue;
+                    }
+
+                    double parsedQty = parseQuantity(use.getQuantity());
+                    if (parsedQty <= 0) {
+                        markUnresolved(use, "Quantity could not be parsed; ingredient skipped in macro calculation.");
+                        combinedUsdaText.append(usdaData.description()).append(" ");
+                        continue;
+                    }
+                    double multiplier = calculateMultiplier(parsedQty, use.getUnit(), use.getName(), usdaData.portions());
+                    if (multiplier <= 0) {
+                        markUnresolved(use, "No compatible USDA portion for quantity/unit; ingredient skipped in macro calculation.");
+                        combinedUsdaText.append(usdaData.description()).append(" ");
+                        continue;
+                    }
+
+                    markResolved(use);
+
+                    // Apply the multiplier to the 100g baseline macros
+                    totalGrams += multiplier * 100.0;
+                    totalCal += macros.calories() * multiplier;
+                    totalProt += macros.protein() * multiplier;
+                    totalCarbs += macros.carbs() * multiplier;
+                    totalFat += macros.fat() * multiplier;
+                    totalSugar += macros.sugar() * multiplier;
+                    totalSodium += macros.sodium() * multiplier;
+
+                    combinedUsdaText.append(usdaData.description()).append(" ");
                 } catch (Exception e) {
-                    // Ignore mapping errors
+                    markUnresolved(use, "Ingredient mapping could not be processed; ingredient skipped in macro calculation.");
                 }
             }
 
@@ -123,10 +136,27 @@ public class UsdaApiClientService {
 
     private Map<String, UsdaFoodData> fetchMacrosFromUsda(List<Integer> fdcIds) {
         Map<String, UsdaFoodData> result = new HashMap<>();
+        List<Integer> missingIds = new ArrayList<>();
+
+        for (Integer fdcId : fdcIds) {
+            if (fdcId == null) continue;
+            String key = String.valueOf(fdcId);
+            UsdaFoodData cached = foodDataCache.get(key);
+            if (cached != null) {
+                result.put(key, cached);
+            } else {
+                missingIds.add(fdcId);
+            }
+        }
+
+        if (missingIds.isEmpty()) {
+            return result;
+        }
+
         String url = "https://api.nal.usda.gov/fdc/v1/foods?api_key=" + apiKey;
 
         Map<String, Object> requestBody = Map.of(
-            "fdcIds", fdcIds,
+            "fdcIds", missingIds,
             "format", "full"
         );
 
@@ -145,7 +175,9 @@ public class UsdaApiClientService {
                 String ingredientsText = food.path("ingredients").asText("");
                 if (ingredientsText.isEmpty()) ingredientsText = food.path("description").asText("");
 
-                result.put(fdcId, new UsdaFoodData(extractMacros(nutrients), ingredientsText, portions));
+                UsdaFoodData foodData = new UsdaFoodData(extractMacros(nutrients), ingredientsText, portions);
+                foodDataCache.put(fdcId, foodData);
+                result.put(fdcId, foodData);
             }
         } catch (Exception e) {
             System.err.println("USDA API Call Failed: " + e.getMessage());
@@ -400,8 +432,53 @@ private double resolvePortionMultiplier(String normalizedUnit, double quantity, 
     }
 
     if (best == null && hasExplicitUnit) {
+        double wholeItemMultiplier = resolveWholeItemPortionMultiplier(normalizedUnit, quantity, portions);
+        if (wholeItemMultiplier > 0) return wholeItemMultiplier;
+
         double convertedVolumeMultiplier = resolveConvertedVolumeMultiplier(normalizedUnit, quantity, portions);
         if (convertedVolumeMultiplier > 0) return convertedVolumeMultiplier;
+    }
+
+    return best == null ? 0.0 : (best.gramsPerRecipeUnit() * quantity) / 100.0;
+}
+
+private double resolveWholeItemPortionMultiplier(String normalizedUnit, double quantity, JsonNode portions) {
+    if (!"whole".equals(normalizedUnit) || portions == null || !portions.isArray()) return 0.0;
+
+    // For "1 whole", trust USDA's own count portion, e.g. "1 bird = 5002g",
+    // and ignore measured sub-portions such as "4 oz = 113g".
+    PortionMatch best = null;
+    for (JsonNode portion : portions) {
+        double gramWeight = portion.path("gramWeight").asDouble(0.0);
+        if (gramWeight <= 0) continue;
+
+        double portionAmount = portion.path("amount").asDouble(1.0);
+        if (portionAmount <= 0) portionAmount = 1.0;
+
+        String combined = normalizeModifier(String.join(" ",
+                portion.path("modifier").asText(""),
+                portion.path("measureUnit").path("name").asText(""),
+                portion.path("measureUnit").path("abbreviation").asText("")
+        ));
+
+        if (combined.isBlank()
+                || containsMeasuredPortion(combined)
+                || isPartialPortion(combined)
+                || isPackagePortion(combined)) {
+            continue;
+        }
+
+        int sequenceNumber = portion.path("sequenceNumber").asInt(Integer.MAX_VALUE);
+        double gramsPerWholeItem = gramWeight / portionAmount;
+        int score = (int) Math.min(Integer.MAX_VALUE, Math.round(gramsPerWholeItem));
+
+        PortionMatch candidate = new PortionMatch(score, gramsPerWholeItem, sequenceNumber);
+        if (best == null
+                || candidate.gramsPerRecipeUnit() > best.gramsPerRecipeUnit()
+                || (candidate.gramsPerRecipeUnit() == best.gramsPerRecipeUnit()
+                && candidate.sequenceNumber() < best.sequenceNumber())) {
+            best = candidate;
+        }
     }
 
     return best == null ? 0.0 : (best.gramsPerRecipeUnit() * quantity) / 100.0;
@@ -474,10 +551,6 @@ private int scorePortion(
 
     if (!normalizedUnit.isEmpty()) {
         if (containsUnitToken(combined, normalizedUnit)) return 100;
-        if (isWholeItemUnit(normalizedUnit)
-                && containsAny(combined, "whole", "medium", "large", "small", "piece", "item", "fruit", "fillet", "serving")) {
-            return 75;
-        }
         return 0;
     }
 
@@ -525,8 +598,18 @@ private boolean containsAny(String text, String... tokens) {
     return false;
 }
 
-private boolean isWholeItemUnit(String unit) {
-    return containsUnitToken("whole medium large small piece item fruit fillet", unit);
+private boolean containsMeasuredPortion(String text) {
+    return containsAny(text, "cup", "tbsp", "tsp", "floz", "oz", "g", "kg", "ml", "l", "lb");
+}
+
+private boolean isPartialPortion(String text) {
+    return containsAny(text,
+            "slice", "sliced", "strip", "piece", "pieces", "serving",
+            "chopped", "diced", "minced", "shredded", "cubic", "cube");
+}
+
+private boolean isPackagePortion(String text) {
+    return containsAny(text, "container", "package", "packet", "can", "bottle", "jar");
 }
 
 private boolean containsIngredientToken(String text, String ingredientName) {
@@ -612,6 +695,16 @@ private String safeString(String value) {
 
 private boolean isBlank(String value) {
     return value == null || value.isBlank();
+}
+
+private void markResolved(IngredientUse use) {
+    use.setMacroResolved(true);
+    use.setMacroResolutionReason("");
+}
+
+private void markUnresolved(IngredientUse use, String reason) {
+    use.setMacroResolved(false);
+    use.setMacroResolutionReason(reason);
 }
 
 private double resolveServings(RecipeCandidate recipe, double totalGrams) {

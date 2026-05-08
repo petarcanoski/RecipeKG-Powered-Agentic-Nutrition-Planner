@@ -71,8 +71,7 @@ public class MedicalAgentService {
             "hard_exclusions": ["<String>"],
             "nutrient_caps": [
               { "nutrient": "<String>", "max_value": <Number>, "unit": "<String>" }
-            ],
-            "required_boosts": ["<String>"]
+            ]
           },
           "medical_rationale": "<String detailing the clinical reasoning>"
         }

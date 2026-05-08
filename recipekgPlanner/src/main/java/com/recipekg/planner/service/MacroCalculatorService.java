@@ -11,26 +11,32 @@ public class MacroCalculatorService {
     public MacroTargets calculate(UserProfile p) {
 
         double bmr;
+        double weight = p.getWeight() == null ? 0.0 : p.getWeight();
+        double height = p.getHeight() == null ? 0.0 : p.getHeight();
+        int age = p.getAge() == null ? 0 : p.getAge();
+        String gender = p.getGender() == null ? "" : p.getGender();
+        String activityLevel = p.getActivityLevel() == null ? "" : p.getActivityLevel().toUpperCase();
+        String goal = p.getGoal() == null ? "" : p.getGoal().toUpperCase();
 
-        if ("MALE".equalsIgnoreCase(p.getGender())) {
+        if ("MALE".equalsIgnoreCase(gender)) {
 
             bmr =
-                    10 * p.getWeight() +
-                            6.25 * p.getHeight() -
-                            5 * p.getAge() +
+                    10 * weight +
+                            6.25 * height -
+                            5 * age +
                             5;
 
         } else {
 
             bmr =
-                    10 * p.getWeight() +
-                            6.25 * p.getHeight() -
-                            5 * p.getAge() -
+                    10 * weight +
+                            6.25 * height -
+                            5 * age -
                             161;
         }
 
         double activityMultiplier =
-                switch (p.getActivityLevel()) {
+                switch (activityLevel) {
 
                     case "LOW" -> 1.3;
                     case "MEDIUM" -> 1.55;
@@ -40,14 +46,14 @@ public class MacroCalculatorService {
 
         double tdee = bmr * activityMultiplier;
 
-        if ("GAIN".equalsIgnoreCase(p.getGoal()))
+        if (goal.contains("GAIN") || goal.contains("MUSCLE") || goal.contains("HYPERTROPHY") || goal.contains("BULK"))
             tdee += 400;
 
-        if ("LOSE".equalsIgnoreCase(p.getGoal()))
+        if (goal.contains("LOSE") || goal.contains("LOSS") || goal.contains("CUT") || goal.contains("FAT"))
             tdee -= 400;
 
         double protein =
-                p.getWeight() * 2.0;
+                weight * 2.0;
 
         double fats =
                 tdee * 0.25 / 9;
