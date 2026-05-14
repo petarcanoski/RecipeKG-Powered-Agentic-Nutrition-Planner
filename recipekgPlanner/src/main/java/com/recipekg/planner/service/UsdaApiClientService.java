@@ -124,12 +124,12 @@ public class UsdaApiClientService {
             double servings = resolveServings(recipe, totalGrams);
             recipe.setServings(servings);
 
-            recipe.setCalories(totalCal / servings);
-            recipe.setProtein(totalProt / servings);
-            recipe.setCarbs(totalCarbs / servings);
-            recipe.setFat(totalFat / servings);
-            recipe.setSugar(totalSugar / servings);
-            recipe.setSodium(totalSodium / servings);
+            recipe.setCalories(roundOneDecimal(totalCal / servings));
+            recipe.setProtein(roundOneDecimal(totalProt / servings));
+            recipe.setCarbs(roundOneDecimal(totalCarbs / servings));
+            recipe.setFat(roundOneDecimal(totalFat / servings));
+            recipe.setSugar(roundOneDecimal(totalSugar / servings));
+            recipe.setSodium(roundOneDecimal(totalSodium / servings));
             recipe.setUsdaIngredientText(combinedUsdaText.toString().trim());
         }
     }
@@ -388,6 +388,10 @@ private double safeParseDouble(String value) {
     }
 }
 
+private double roundOneDecimal(double value) {
+    return Math.round(value * 10.0) / 10.0;
+}
+
 private double resolvePortionMultiplier(String normalizedUnit, double quantity, String ingredientName, JsonNode portions) {
     if (portions == null || !portions.isArray()) return 0.0;
 
@@ -431,6 +435,11 @@ private double resolvePortionMultiplier(String normalizedUnit, double quantity, 
         }
     }
 
+    // No exact USDA portion match was found
+    // AND the recipe has an explicit unit
+    // recipe unit = tbsp
+    // USDA portions only have "cup"
+    
     if (best == null && hasExplicitUnit) {
         double wholeItemMultiplier = resolveWholeItemPortionMultiplier(normalizedUnit, quantity, portions);
         if (wholeItemMultiplier > 0) return wholeItemMultiplier;

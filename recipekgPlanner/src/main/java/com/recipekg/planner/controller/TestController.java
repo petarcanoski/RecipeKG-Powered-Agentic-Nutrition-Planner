@@ -1,6 +1,7 @@
 package com.recipekg.planner.controller;
 
 import com.recipekg.planner.model.MedicalManifest;
+import com.recipekg.planner.model.NutritionPlan;
 import com.recipekg.planner.model.RecipeCandidate;
 import com.recipekg.planner.model.UserProfile;
 import com.recipekg.planner.repository.UserProfileRepository;

@@ -20,6 +20,8 @@ public class RecipeCandidate {
     private double sodium;
     private double performanceScore;
     private String performanceReason = "";
+    private double macroConfidence;
+    private double nutritionistPromptScore;
     private Map<String, String> macroUnits = Map.of(
             "calories", "kcal per serving",
             "protein", "g per serving",

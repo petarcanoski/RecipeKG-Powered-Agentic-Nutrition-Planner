@@ -33,7 +33,6 @@ public class MedicalAgentService {
         CRITICAL RULES FOR TERMINOLOGY & STATUS:
         1. STATUS DETERMINATION: 
            - If 'Allergies' is "None" AND 'Diseases/Conditions' is "None", you MUST set "status": "UNCONSTRAINED". 
-           - Do NOT apply general population preventative guidelines (like WHO sodium caps) to healthy users.
            - ONLY set "status": "CONSTRAINED" if the user has a specific allergy, disease, or clinical condition requiring strict filtering.
         2. 'hard_exclusions': Your job is to act as a Keyword Unroller. You must translate the user's dietary restrictions into a flat JSON array of singular, root ingredient keywords and common foods that contain them.
                 - Do NOT use broad ontology categories. Unroll them into specific, high-risk ingredients.

@@ -48,9 +48,9 @@ public class FoodScientistService {
             PREFIX oboInOwl: <http://www.geneontology.org/formats/oboInOwl#>
             """;
 
-    public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest) {
-        return fetchSafePantry(profile, manifest, null);
-    }
+    // public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest) {
+    //     return fetchSafePantry(profile, manifest, null);
+    // }
 
     public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest, PerformanceManifest performanceManifest) {
         String sparqlQuery = buildSafeCandidateQuery(manifest);

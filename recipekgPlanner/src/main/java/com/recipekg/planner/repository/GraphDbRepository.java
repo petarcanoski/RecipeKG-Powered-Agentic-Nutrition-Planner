@@ -47,12 +47,6 @@ public class GraphDbRepository {
                     byRecipe.put(uri, candidate);
                 }
 
-                String servingsRaw = row.hasBinding("servings") ? row.getValue("servings").stringValue() : "";
-                Double servings = parseServings(servingsRaw);
-                if (servings != null && (candidate.getServings() == null || candidate.getServings() <= 0)) {
-                    candidate.setServings(servings);
-                }
-
                 String ingNameUri = row.hasBinding("ingName") ? row.getValue("ingName").stringValue() : "";
                 String ingLabel = row.hasBinding("ingLabel") ? row.getValue("ingLabel").stringValue() : "";
                 String qty = row.hasBinding("qty") ? row.getValue("qty").stringValue() : "";
@@ -119,7 +113,8 @@ private QuantityUnitPair chooseQuantityUnitPair(Set<QuantityUnitPair> pairs) {
 private double estimatedPairWeight(String quantity, String unit) {
     if (quantity == null || quantity.isBlank()) return Double.MAX_VALUE;
 
-    double parsedQuantity = parseServings(quantity) == null ? 0.0 : parseServings(quantity);
+    Double parsedQuantityValue = parseQuantityValue(quantity);
+    double parsedQuantity = parsedQuantityValue == null ? 0.0 : parsedQuantityValue;
     if (parsedQuantity <= 0) return Double.MAX_VALUE;
 
     return parsedQuantity * unitWeight(unit);
@@ -148,7 +143,7 @@ private String safeString(String value) {
     return value == null ? "" : value.trim();
 }
 
-private Double parseServings(String raw) {
+private Double parseQuantityValue(String raw) {
     if (raw == null || raw.isBlank()) return null;
 
     String cleaned = raw.trim().toLowerCase();
