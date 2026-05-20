@@ -8,6 +8,15 @@ public record MacroSummary(
         double sugar,
         double sodium
 ) {
+    public MacroSummary {
+        calories = roundOneDecimal(calories);
+        protein = roundOneDecimal(protein);
+        carbs = roundOneDecimal(carbs);
+        fat = roundOneDecimal(fat);
+        sugar = roundOneDecimal(sugar);
+        sodium = roundOneDecimal(sodium);
+    }
+
     public MacroSummary plus(MacroSummary other) {
         if (other == null) return this;
         return new MacroSummary(
@@ -33,5 +42,9 @@ public record MacroSummary(
 
     public static MacroSummary zero() {
         return new MacroSummary(0, 0, 0, 0, 0, 0);
+    }
+
+    private static double roundOneDecimal(double value) {
+        return Math.round(value * 10.0) / 10.0;
     }
 }

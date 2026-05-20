@@ -1,18 +1,24 @@
 package com.recipekg.planner.service.agents;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.recipekg.planner.model.DailyMealPlan;
 import com.recipekg.planner.model.IngredientUse;
 import com.recipekg.planner.model.MacroSummary;
 import com.recipekg.planner.model.MedicalManifest;
 import com.recipekg.planner.model.NutritionPlan;
+import com.recipekg.planner.model.NutritionistSelectionState;
 import com.recipekg.planner.model.PerformanceManifest;
 import com.recipekg.planner.model.PlannedMeal;
+import com.recipekg.planner.model.PlanningIterationTrace;
+import com.recipekg.planner.model.PlanningTrace;
 import com.recipekg.planner.model.RecipeBrief;
 import com.recipekg.planner.model.RecipeCandidate;
 import com.recipekg.planner.model.UserProfile;
+import com.recipekg.planner.model.ValidationResult;
+import com.recipekg.planner.service.NutritionistBatchSelectionService;
+import com.recipekg.planner.service.ValidationBrainService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -21,12 +27,13 @@ import org.springframework.web.reactive.function.client.WebClient;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -35,14 +42,28 @@ public class NutritionistAgentService {
     private static final Set<String> ALLOWED_SLOTS = Set.of("breakfast", "lunch", "dinner", "snack", "dessert");
 
     private final WebClient webClient;
+    private final NutritionistBatchSelectionService batchSelectionService;
+    private final ValidationBrainService validationBrainService;
     private final ObjectMapper mapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     @Value("${gemini.api-key}")
     private String apiKey;
 
-    @Value("${nutritionist.recipe-limit:60}")
-    private int recipeLimit;
+    @Value("${nutritionist.batch-size:30}")
+    private int batchSize;
+
+    @Value("${nutritionist.max-selection-batches:3}")
+    private int maxSelectionBatches;
+
+    @Value("${nutritionist.shortlist-size:24}")
+    private int shortlistSize;
+
+    @Value("${nutritionist.repair-recipe-limit:30}")
+    private int repairRecipeLimit;
+
+    @Value("${nutritionist.max-repair-iterations:2}")
+    private int maxRepairIterations;
 
     public NutritionPlan generateSevenDayPlan(
             UserProfile profile,
@@ -50,80 +71,392 @@ public class NutritionistAgentService {
             PerformanceManifest performanceManifest,
             List<RecipeCandidate> recipes
     ) {
-        annotateMacroQuality(recipes);
-        Map<String, RecipeCandidate> recipeById = assignRecipeIds(choosePromptRecipes(recipes));
-        List<RecipeBrief> briefs = buildRecipeBriefs(recipeById);
+        String sessionId = UUID.randomUUID().toString();
+        List<PlanningIterationTrace> traces = new ArrayList<>();
+        Map<String, RecipeCandidate> recipeById = assignRecipeIds(recipes);
 
+        if (recipeById.isEmpty()) {
+            return emptyPlan(performanceManifest, sessionId, "No usable recipe candidates were available for meal planning.");
+        }
+
+        NutritionistSelectionState selectionState = runBatchSelection(
+                profile,
+                medicalManifest,
+                performanceManifest,
+                recipeById,
+                traces,
+                sessionId
+        );
+
+        List<RecipeCandidate> shortlisted = batchSelectionService.selectedCandidates(selectionState, recipeById);
+        if (shortlisted.isEmpty()) {
+            System.err.println("Nutritionist plan failed: Gemini did not produce a usable recipe shortlist.");
+            return errorPlan(performanceManifest, sessionId, traces, "Nutritionist could not create a usable recipe shortlist.");
+        }
+
+        NutritionPlan currentPlan = buildFinalPlan(profile, medicalManifest, performanceManifest, recipeById, shortlisted);
+        if (currentPlan == null) {
+            return errorPlan(performanceManifest, sessionId, traces, "Nutritionist could not create a 7-day plan.");
+        }
+
+        ValidationResult validation = validationBrainService.validate(currentPlan, performanceManifest, medicalManifest, recipeById);
+        traces.add(planTrace(traces.size() + 1, "PLAN_BUILD", shortlisted, currentPlan, validation));
+        logIteration(sessionId, traces.get(traces.size() - 1));
+
+        if (validation.passed()) {
+            return withTrace(currentPlan, sessionId, "PASS", traces);
+        }
+
+        for (int iteration = 1; iteration <= maxRepairIterations; iteration++) {
+            List<RecipeCandidate> unusedCandidates = batchSelectionService.unusedCandidates(
+                    recipeById.values(),
+                    currentPlan,
+                    repairRecipeLimit
+            );
+            List<RecipeCandidate> repairCandidates = repairCandidatePool(recipeById, currentPlan, unusedCandidates);
+
+            currentPlan = repairPlan(
+                    profile,
+                    medicalManifest,
+                    performanceManifest,
+                    recipeById,
+                    currentPlan,
+                    validation,
+                    repairCandidates
+            );
+            if (currentPlan == null) {
+                return errorPlan(performanceManifest, sessionId, traces, "Nutritionist could not repair the 7-day plan.");
+            }
+
+            validation = validationBrainService.validate(currentPlan, performanceManifest, medicalManifest, recipeById);
+            traces.add(planTrace(traces.size() + 1, "REPAIR", repairCandidates, currentPlan, validation));
+            logIteration(sessionId, traces.get(traces.size() - 1));
+
+            if (validation.passed()) {
+                return withTrace(currentPlan, sessionId, "PASS", traces);
+            }
+        }
+
+        return withTrace(currentPlan, sessionId, "REVISE", traces);
+    }
+
+    private List<RecipeCandidate> repairCandidatePool(
+            Map<String, RecipeCandidate> recipeById,
+            NutritionPlan currentPlan,
+            List<RecipeCandidate> unusedCandidates
+    ) {
+        Map<String, RecipeCandidate> candidates = new LinkedHashMap<>();
+
+        if (currentPlan != null && currentPlan.days() != null) {
+            currentPlan.days().forEach(day -> {
+                if (day.meals() == null) return;
+                for (PlannedMeal meal : day.meals()) {
+                    RecipeCandidate recipe = recipeById.get(meal.recipeId());
+                    if (recipe != null) {
+                        candidates.put(meal.recipeId(), recipe);
+                    }
+                }
+            });
+        }
+
+        if (unusedCandidates != null) {
+            Map<String, String> idByUri = idByUri(recipeById);
+            for (RecipeCandidate recipe : unusedCandidates) {
+                String id = idByUri.get(recipe.getUri());
+                if (id != null) {
+                    candidates.put(id, recipe);
+                }
+            }
+        }
+
+        return new ArrayList<>(candidates.values());
+    }
+
+    private NutritionistSelectionState runBatchSelection(
+            UserProfile profile,
+            MedicalManifest medicalManifest,
+            PerformanceManifest performanceManifest,
+            Map<String, RecipeCandidate> recipeById,
+            List<PlanningIterationTrace> traces,
+            String sessionId
+    ) {
+        NutritionistSelectionState state = NutritionistSelectionState.empty();
+        List<List<RecipeCandidate>> batches = batchSelectionService.firstBatches(
+                new ArrayList<>(recipeById.values()),
+                batchSize,
+                maxSelectionBatches
+        );
+
+        Map<String, String> idByUri = idByUri(recipeById);
+        int iteration = 1;
+        for (List<RecipeCandidate> batch : batches) {
+            try {
+                Set<String> allowedThisRound = allowedSelectionIds(state, batch, idByUri);
+                String prompt = buildBatchSelectionPrompt(
+                        profile,
+                        medicalManifest,
+                        performanceManifest,
+                        recipeById,
+                        batch,
+                        state,
+                        iteration
+                );
+                NutritionistSelectionState rawState = parseSelectionState(callGemini(prompt));
+                state = batchSelectionService.normalizeState(rawState, allowedThisRound, shortlistSize);
+            } catch (Exception e) {
+                System.err.println("Nutritionist batch selection failed: " + e.getMessage());
+            }
+
+            traces.add(selectionTrace(iteration, batch, state));
+            logIteration(sessionId, traces.get(traces.size() - 1));
+            iteration++;
+        }
+
+        return state;
+    }
+
+    private Set<String> allowedSelectionIds(
+            NutritionistSelectionState state,
+            List<RecipeCandidate> batch,
+            Map<String, String> idByUri
+    ) {
+        Set<String> allowed = new LinkedHashSet<>();
+        if (state != null && state.selectedRecipeIds() != null) {
+            allowed.addAll(state.selectedRecipeIds());
+        }
+        if (batch != null) {
+            for (RecipeCandidate recipe : batch) {
+                String id = idByUri.get(recipe.getUri());
+                if (id != null) allowed.add(id);
+            }
+        }
+        return allowed;
+    }
+
+    private NutritionPlan buildFinalPlan(
+            UserProfile profile,
+            MedicalManifest medicalManifest,
+            PerformanceManifest performanceManifest,
+            Map<String, RecipeCandidate> recipeById,
+            List<RecipeCandidate> candidates
+    ) {
+        List<RecipeBrief> briefs = buildRecipeBriefs(recipeById, candidates);
         if (briefs.isEmpty()) {
-            return emptyPlan(performanceManifest, "No usable recipe candidates were available for meal planning.");
+            System.err.println("Nutritionist final plan failed: no shortlisted recipe briefs were available.");
+            return null;
         }
 
         try {
-            String prompt = buildPrompt(profile, medicalManifest, performanceManifest, briefs);
-            String text = callGemini(prompt);
-            NutritionistRawPlan rawPlan = parseRawPlan(text);
-            NutritionPlan plan = hydrateAndCompute(rawPlan, recipeById);
-            if (isUsable(plan)) {
-                return plan;
-            }
+            String prompt = buildFinalPlanPrompt(profile, medicalManifest, performanceManifest, briefs);
+            return hydrateAndCompute(parseRawPlan(callGemini(prompt)), recipeById);
         } catch (Exception e) {
-            System.err.println("Nutritionist agent failed; using deterministic fallback: " + e.getMessage());
+            System.err.println("Nutritionist final plan failed: " + e.getMessage());
+            return null;
         }
-        return null;
-//        return fallbackPlan(performanceManifest, recipeById);
     }
 
-    private List<RecipeCandidate> choosePromptRecipes(List<RecipeCandidate> recipes) {
-        if (recipes == null || recipes.isEmpty()) return List.of();
+    private NutritionPlan repairPlan(
+            UserProfile profile,
+            MedicalManifest medicalManifest,
+            PerformanceManifest performanceManifest,
+            Map<String, RecipeCandidate> recipeById,
+            NutritionPlan currentPlan,
+            ValidationResult validationResult,
+            List<RecipeCandidate> repairCandidates
+    ) {
+        List<RecipeBrief> briefs = buildRecipeBriefs(recipeById, repairCandidates);
+        if (briefs.isEmpty()) return currentPlan;
 
-        return recipes.stream()
-                .filter(Objects::nonNull)
-                .sorted(Comparator
-                        .comparingDouble(RecipeCandidate::getNutritionistPromptScore).reversed()
-                        .thenComparing(Comparator.comparingDouble(RecipeCandidate::getPerformanceScore).reversed()))
-                .limit(Math.max(10, recipeLimit))
-                .toList();
+        try {
+            String prompt = buildRepairPrompt(
+                    profile,
+                    medicalManifest,
+                    performanceManifest,
+                    briefs,
+                    currentPlan,
+                    validationResult
+            );
+            return hydrateAndCompute(parseRawPlan(callGemini(prompt)), recipeById);
+        } catch (Exception e) {
+            System.err.println("Nutritionist repair failed: " + e.getMessage());
+            return null;
+        }
     }
 
     private Map<String, RecipeCandidate> assignRecipeIds(List<RecipeCandidate> recipes) {
         Map<String, RecipeCandidate> byId = new LinkedHashMap<>();
-        for (int i = 0; i < recipes.size(); i++) {
-            byId.put("R" + (i + 1), recipes.get(i));
+        if (recipes == null) return byId;
+
+        List<RecipeCandidate> usable = recipes.stream()
+                .filter(Objects::nonNull)
+                .toList();
+
+        for (int i = 0; i < usable.size(); i++) {
+            byId.put("R" + (i + 1), usable.get(i));
         }
         return byId;
     }
 
-    private List<RecipeBrief> buildRecipeBriefs(Map<String, RecipeCandidate> recipeById) {
-        return recipeById.entrySet().stream()
-                .map(entry -> {
-                    RecipeCandidate recipe = entry.getValue();
+    private List<RecipeBrief> buildRecipeBriefs(
+            Map<String, RecipeCandidate> recipeById,
+            List<RecipeCandidate> candidates
+    ) {
+        if (candidates == null || candidates.isEmpty()) return List.of();
+
+        Map<String, String> idByUri = idByUri(recipeById);
+        return candidates.stream()
+                .filter(Objects::nonNull)
+                .map(recipe -> {
+                    String id = idByUri.get(recipe.getUri());
+                    if (id == null) return null;
                     return new RecipeBrief(
-                            entry.getKey(),
+                            id,
                             safe(recipe.getLabel()),
-                            inferMealHints(recipe),
                             keyIngredients(recipe),
                             macros(recipe),
                             safeDouble(recipe.getServings()),
-                            recipe.getPerformanceScore(),
-                            recipe.getMacroConfidence(),
-                            recipe.getNutritionistPromptScore(),
                             unresolvedIngredients(recipe)
                     );
                 })
+                .filter(Objects::nonNull)
                 .toList();
     }
 
-    private String buildPrompt(
+    private String buildBatchSelectionPrompt(
+            UserProfile profile,
+            MedicalManifest medicalManifest,
+            PerformanceManifest performanceManifest,
+            Map<String, RecipeCandidate> recipeById,
+            List<RecipeCandidate> batch,
+            NutritionistSelectionState currentState,
+            int batchNumber
+    ) throws Exception {
+        List<RecipeBrief> batchBriefs = buildRecipeBriefs(recipeById, batch);
+        List<RecipeBrief> currentShortlist = buildRecipeBriefs(
+                recipeById,
+                batchSelectionService.selectedCandidates(currentState, recipeById)
+        );
+
+        return """
+You are a nutritionist recipe scout.
+
+Your job is NOT to build the final 7-day plan yet.
+Your job is to maintain a rolling shortlist of recipe IDs that could become a strong 7-day plan.
+Do not use hidden numeric scoring. Compare recipes with nutrition judgment.
+Macros are USDA-derived estimates from ingredient mappings and portion inference; use them as signals, not ground truth.
+If a macro value looks implausible for the label or ingredients, discount it and mention the concern.
+
+Selection priorities:
+- Fit the user's goal, activity level, and performance targets.
+- Respect medical constraints.
+- Keep useful coverage for breakfast, lunch, dinner, snacks, and optional desserts.
+- Prefer variety across proteins, carbs, vegetables, cuisines, textures, and meal sizes.
+- Keep recipes with unresolved ingredients if they are still useful, but be cautious when unresolved ingredients seem nutritionally important.
+- In later batches, replace earlier choices when a new recipe is clearly more useful. Do not preserve previous choices out of inertia.
+
+Return strict JSON only.
+Use only recipe IDs present in CURRENT_SHORTLIST or NEW_BATCH.
+Keep at most %d recipes in selectedRecipeIds.
+
+USER_PROFILE:
+%s
+
+MEDICAL_MANIFEST:
+%s
+
+PERFORMANCE_MANIFEST:
+%s
+
+BATCH_NUMBER:
+%d
+
+CURRENT_SELECTION_MEMORY:
+%s
+
+CURRENT_SHORTLIST:
+%s
+
+NEW_BATCH:
+%s
+
+OUTPUT_SCHEMA:
+{
+  "selectedRecipeIds": ["R1"],
+  "rejectedRecipeIds": ["R2"],
+  "substitutions": [
+    {
+      "removedRecipeId": "R3",
+      "addedRecipeId": "R31",
+      "reason": "short reason"
+    }
+  ],
+  "missingNeeds": ["short notes about what the shortlist still lacks"],
+  "nutritionConcerns": ["short notes about sodium, implausible macros, unresolved important ingredients, etc."],
+  "planningNotes": ["short notes useful for the final plan builder"]
+}
+""".formatted(
+                Math.max(1, shortlistSize),
+                mapper.writeValueAsString(compactProfile(profile)),
+                mapper.writeValueAsString(compactMedical(medicalManifest)),
+                mapper.writeValueAsString(performanceManifest),
+                batchNumber,
+                mapper.writeValueAsString(currentState),
+                mapper.writeValueAsString(currentShortlist),
+                mapper.writeValueAsString(batchBriefs)
+        );
+    }
+
+    private String buildFinalPlanPrompt(
             UserProfile profile,
             MedicalManifest medicalManifest,
             PerformanceManifest performanceManifest,
             List<RecipeBrief> briefs
     ) throws Exception {
-        String profileJson = mapper.writeValueAsString(compactProfile(profile));
-        String medicalJson = mapper.writeValueAsString(compactMedical(medicalManifest));
-        String performanceJson = mapper.writeValueAsString(performanceManifest);
-        String recipeJson = mapper.writeValueAsString(briefs);
+        return planningBasePrompt(profile, medicalManifest, performanceManifest, briefs) + """
 
+TASK:
+Build the final 7-day plan from the shortlisted recipes.
+Before returning JSON, count recipeId usage across the whole week. No recipe may appear more than 2 times.
+""";
+    }
+
+    private String buildRepairPrompt(
+            UserProfile profile,
+            MedicalManifest medicalManifest,
+            PerformanceManifest performanceManifest,
+            List<RecipeBrief> briefs,
+            NutritionPlan currentPlan,
+            ValidationResult validationResult
+    ) throws Exception {
+        String currentPlanJson = mapper.writeValueAsString(compactPlan(currentPlan));
+        String validationJson = mapper.writeValueAsString(validationResult);
+
+        return planningBasePrompt(profile, medicalManifest, performanceManifest, briefs) + """
+
+CURRENT_PLAN:
+%s
+
+VALIDATION_ISSUES:
+%s
+
+TASK:
+Repair the current plan while changing as little as possible.
+Prioritize HIGH severity issues.
+AVAILABLE_RECIPE_CANDIDATES includes the current plan recipes plus replacement options.
+Keep non-problem meals when they still fit, but replace enough repeated meals to satisfy every validation issue.
+Hard constraint: no recipeId may appear more than 2 times in the returned week. There are no exceptions.
+If the current plan has 4 meals/day and repetition is hard to fix, use 3 meals/day on some days instead of repeating recipes.
+Before returning JSON, count recipeId usage across the whole week and fix any count above 2.
+Return the complete corrected 7-day plan, not a patch.
+""".formatted(currentPlanJson, validationJson);
+    }
+
+    private String planningBasePrompt(
+            UserProfile profile,
+            MedicalManifest medicalManifest,
+            PerformanceManifest performanceManifest,
+            List<RecipeBrief> briefs
+    ) throws Exception {
         return """
 You are a certified sports nutritionist and meal-planning agent.
 
@@ -150,27 +483,19 @@ PERFORMANCE_MANIFEST:
 AVAILABLE_RECIPE_CANDIDATES:
 %s
 
-MEAL_SLOT_GUIDANCE:
-Breakfast: choose breakfast-like, lighter, simple, early-day appropriate meals.
-Lunch: choose balanced meals with protein plus carbs or vegetables.
-Dinner: choose complete entree-style meals, often larger and higher protein.
-Snack: choose smaller/simple meals or half servings.
-Dessert: optional; use sweet recipes only when they fit the day.
 
 RULES:
 1. Build exactly 7 days.
-2. Each day must contain 3 to 5 meals.
+2. Each day should contain 3 to 5 meals.
 3. Prefer breakfast, lunch, and dinner every day.
 4. Add snack or dessert only when useful.
 5. Serving counts may be 0.5, 1.0, 1.5, or 2.0.
-6. For high activity or hypertrophy, prioritize protein and enough calories.
-7. For fat loss, prioritize high protein and moderate calories.
-8. Avoid repeating the same recipe more than twice unless the pool is limited.
-9. Prefer higher macroConfidence and nutritionistPromptScore recipes.
-10. Be cautious with implausible macro values or recipes with important unresolved ingredients.
-11. performanceScore is a helpful hint, not a hard rule.
-12. Medical constraints are mandatory.
-13. Output recipe IDs only, not full recipe objects.
+6. Hard repetition cap: no recipe ID may appear more than 2 times in the entire week. There are no exceptions.
+7. Do not rank recipes by a hidden score. Choose them because they make nutritional and practical sense.
+8. Be cautious with implausible macro values or recipes with important unresolved ingredients.
+9. Medical constraints are mandatory.
+10. Before returning JSON, count every recipeId occurrence. If any recipeId appears 3 or more times, revise before answering.
+11. Output recipe IDs only, not full recipe objects.
 
 OUTPUT_SCHEMA:
 {
@@ -179,7 +504,6 @@ OUTPUT_SCHEMA:
   "days": [
     {
       "day": 1,
-      "theme": "string",
       "meals": [
         {
           "slot": "breakfast|lunch|dinner|snack|dessert",
@@ -192,7 +516,12 @@ OUTPUT_SCHEMA:
     }
   ]
 }
-""".formatted(profileJson, medicalJson, performanceJson, recipeJson);
+""".formatted(
+                mapper.writeValueAsString(compactProfile(profile)),
+                mapper.writeValueAsString(compactMedical(medicalManifest)),
+                mapper.writeValueAsString(performanceManifest),
+                mapper.writeValueAsString(briefs)
+        );
     }
 
     private String callGemini(String prompt) {
@@ -224,9 +553,16 @@ OUTPUT_SCHEMA:
         }
     }
 
+    private NutritionistSelectionState parseSelectionState(String jsonText) throws Exception {
+        JsonNode node = mapper.readTree(stripCodeFence(jsonText));
+        if (node.isArray() && !node.isEmpty()) {
+            node = node.get(0);
+        }
+        return mapper.treeToValue(node, NutritionistSelectionState.class);
+    }
+
     private NutritionistRawPlan parseRawPlan(String jsonText) throws Exception {
-        String trimmed = stripCodeFence(jsonText);
-        JsonNode node = mapper.readTree(trimmed);
+        JsonNode node = mapper.readTree(stripCodeFence(jsonText));
         if (node.isArray() && !node.isEmpty()) {
             node = node.get(0);
         }
@@ -247,7 +583,8 @@ OUTPUT_SCHEMA:
                 safe(rawPlan.goalStatus()),
                 safe(rawPlan.summary()),
                 days,
-                weeklyTotals
+                weeklyTotals,
+                null
         );
     }
 
@@ -263,7 +600,6 @@ OUTPUT_SCHEMA:
 
         return new DailyMealPlan(
                 rawDay.day(),
-                safe(rawDay.theme()),
                 meals,
                 totals,
                 safe(rawDay.dayRationale())
@@ -276,137 +612,147 @@ OUTPUT_SCHEMA:
         RecipeCandidate recipe = recipeById.get(rawMeal.recipeId());
         if (recipe == null) return null;
 
-        String slot = normalizeSlot(rawMeal.slot());
         double servingCount = normalizeServingCount(rawMeal.servings());
-        MacroSummary estimated = macros(recipe).times(servingCount);
-
         return new PlannedMeal(
-                slot,
+                normalizeSlot(rawMeal.slot()),
                 rawMeal.recipeId(),
                 recipe.getUri(),
                 recipe.getLabel(),
                 servingCount,
-                estimated,
+                macros(recipe).times(servingCount),
                 safe(rawMeal.reason())
         );
     }
 
-    private NutritionPlan fallbackPlan(PerformanceManifest performanceManifest, Map<String, RecipeCandidate> recipeById) {
-        List<String> ids = new ArrayList<>(recipeById.keySet());
-        List<DailyMealPlan> days = new ArrayList<>();
-        String[] slots = {"breakfast", "lunch", "dinner"};
-
-        for (int day = 1; day <= 7 && !ids.isEmpty(); day++) {
-            List<PlannedMeal> meals = new ArrayList<>();
-            for (int slotIndex = 0; slotIndex < slots.length; slotIndex++) {
-                String recipeId = ids.get((day - 1 + slotIndex) % ids.size());
-                RecipeCandidate recipe = recipeById.get(recipeId);
-                MacroSummary estimated = macros(recipe);
-                meals.add(new PlannedMeal(
-                        slots[slotIndex],
-                        recipeId,
-                        recipe.getUri(),
-                        recipe.getLabel(),
-                        1.0,
-                        estimated,
-                        "Fallback selection from highest-quality available recipe candidates."
-                ));
-            }
-
-            MacroSummary totals = meals.stream()
-                    .map(PlannedMeal::estimatedMacros)
-                    .reduce(MacroSummary.zero(), MacroSummary::plus);
-
-            days.add(new DailyMealPlan(
-                    day,
-                    "Balanced fallback day",
-                    meals,
-                    totals,
-                    "Generated without LLM planning because the nutritionist agent response was unavailable."
-            ));
-        }
-
-        MacroSummary weeklyTotals = days.stream()
-                .map(DailyMealPlan::estimatedTotals)
-                .reduce(MacroSummary.zero(), MacroSummary::plus);
-
-        return new NutritionPlan(
-                performanceManifest == null ? "" : safe(performanceManifest.goalStatus()),
-                "Fallback 7-day plan generated from high-confidence recipe candidates.",
-                days,
-                weeklyTotals
-        );
-    }
-
-    private NutritionPlan emptyPlan(PerformanceManifest performanceManifest, String summary) {
+    private NutritionPlan emptyPlan(PerformanceManifest performanceManifest, String sessionId, String summary) {
         return new NutritionPlan(
                 performanceManifest == null ? "" : safe(performanceManifest.goalStatus()),
                 summary,
                 List.of(),
-                MacroSummary.zero()
+                MacroSummary.zero(),
+                new PlanningTrace(sessionId, "NO_CANDIDATES", List.of())
         );
     }
 
-    private boolean isUsable(NutritionPlan plan) {
-        return plan != null && plan.days() != null && plan.days().size() == 7;
+    private NutritionPlan errorPlan(
+            PerformanceManifest performanceManifest,
+            String sessionId,
+            List<PlanningIterationTrace> traces,
+            String summary
+    ) {
+        return new NutritionPlan(
+                performanceManifest == null ? "" : safe(performanceManifest.goalStatus()),
+                summary,
+                List.of(),
+                MacroSummary.zero(),
+                new PlanningTrace(sessionId, "ERROR", traces == null ? List.of() : traces)
+        );
     }
 
-    private void annotateMacroQuality(List<RecipeCandidate> recipes) {
-        if (recipes == null) return;
-        for (RecipeCandidate recipe : recipes) {
-            if (recipe == null) continue;
-            recipe.setMacroConfidence(macroConfidence(recipe));
-            recipe.setNutritionistPromptScore(nutritionistPromptScore(recipe));
-        }
+    private NutritionPlan withTrace(
+            NutritionPlan plan,
+            String sessionId,
+            String finalStatus,
+            List<PlanningIterationTrace> traces
+    ) {
+        return new NutritionPlan(
+                plan.goalStatus(),
+                plan.summary(),
+                plan.days(),
+                plan.weeklyTotals(),
+                new PlanningTrace(sessionId, finalStatus, traces)
+        );
     }
 
-    private double nutritionistPromptScore(RecipeCandidate recipe) {
-        double confidence = macroConfidence(recipe);
-        double performance = clamp(recipe.getPerformanceScore(), 0.0, 1.0);
-        return clamp((confidence * 0.60) + (performance * 0.40), 0.0, 1.0);
+    private PlanningIterationTrace selectionTrace(
+            int iterationNumber,
+            List<RecipeCandidate> candidates,
+            NutritionistSelectionState state
+    ) {
+        return new PlanningIterationTrace(
+                iterationNumber,
+                "BATCH_SELECTION",
+                candidateUris(candidates),
+                state.selectedRecipeIds(),
+                new ValidationResult("SELECTED", List.of()),
+                "SELECTED"
+        );
     }
 
-    private double macroConfidence(RecipeCandidate recipe) {
-        if (recipe.getIngredients() == null || recipe.getIngredients().isEmpty()) return 0.0;
-
-        double totalWeight = 0.0;
-        double resolvedWeight = 0.0;
-
-        for (IngredientUse ingredient : recipe.getIngredients()) {
-            double weight = ingredientImportance(ingredient);
-            totalWeight += weight;
-            if (ingredient.isMacroResolved()) {
-                resolvedWeight += weight;
-            }
-        }
-
-        if (totalWeight <= 0) return 1.0;
-        return clamp(resolvedWeight / totalWeight, 0.0, 1.0);
+    private PlanningIterationTrace planTrace(
+            int iterationNumber,
+            String phase,
+            List<RecipeCandidate> candidates,
+            NutritionPlan plan,
+            ValidationResult validation
+    ) {
+        return new PlanningIterationTrace(
+                iterationNumber,
+                phase,
+                candidateUris(candidates),
+                selectedIds(plan),
+                validation,
+                validation.passed() ? "PASS" : "REVISE"
+        );
     }
 
-    private double ingredientImportance(IngredientUse ingredient) {
-        String name = normalizeText(ingredient.getName());
-        String unit = normalizeText(ingredient.getUnit());
-        double quantity = parseQuantity(ingredient.getQuantity());
+    private void logIteration(String sessionId, PlanningIterationTrace trace) {
+        int issueCount = trace.validationResult() == null || trace.validationResult().issues() == null
+                ? 0
+                : trace.validationResult().issues().size();
+        System.out.printf(
+                "Nutritionist session=%s iteration=%d phase=%s status=%s recipesSent=%d selected=%d issues=%d%n",
+                sessionId,
+                trace.iterationNumber(),
+                trace.phase(),
+                trace.status(),
+                trace.recipeIdsSent() == null ? 0 : trace.recipeIdsSent().size(),
+                trace.selectedRecipeIds() == null ? 0 : trace.selectedRecipeIds().size(),
+                issueCount
+        );
+    }
 
-        if (name.isBlank()) return 0.5;
-        if (containsAnyText(name, "water")) return 0.0;
-        if (containsAnyText(name, "salt", "pepper", "spice", "seasoning", "cilantro", "parsley", "thyme", "oregano", "basil")) {
-            return 0.2;
-        }
+    private List<String> candidateUris(List<RecipeCandidate> candidates) {
+        if (candidates == null) return List.of();
+        return candidates.stream()
+                .map(RecipeCandidate::getUri)
+                .filter(Objects::nonNull)
+                .toList();
+    }
 
-        double weight = 1.0;
-        if (containsAnyText(unit, "lb", "lbs", "pound", "kg", "kilogram", "whole")) weight += 1.5;
-        if (containsAnyText(unit, "cup", "cups", "can", "container", "package")) weight += 0.8;
-        if (quantity >= 3.0) weight += 0.5;
-        if (containsAnyText(name, "steak", "beef", "chicken", "turkey", "fish", "salmon", "tuna", "pork", "egg", "tofu", "bean", "lentil")) {
-            weight += 1.0;
-        }
-        if (containsAnyText(name, "oil", "butter", "cream", "cheese", "nuts", "peanut", "rice", "pasta", "bread", "tortilla", "potato")) {
-            weight += 0.6;
-        }
+    private List<String> selectedIds(NutritionPlan plan) {
+        if (plan == null || plan.days() == null) return List.of();
+        return plan.days().stream()
+                .flatMap(day -> day.meals().stream())
+                .map(PlannedMeal::recipeId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+    }
 
-        return Math.max(0.1, weight);
+    private List<Map<String, Object>> compactPlan(NutritionPlan plan) {
+        if (plan == null || plan.days() == null) return List.of();
+        return plan.days().stream()
+                .map(day -> {
+                    Map<String, Object> dayMap = new LinkedHashMap<>();
+                    dayMap.put("day", day.day());
+                    dayMap.put("meals", day.meals().stream().map(meal -> {
+                        Map<String, Object> mealMap = new LinkedHashMap<>();
+                        mealMap.put("slot", meal.slot());
+                        mealMap.put("recipeId", meal.recipeId());
+                        mealMap.put("servings", meal.servings());
+                        return mealMap;
+                    }).toList());
+                    dayMap.put("estimatedTotals", day.estimatedTotals());
+                    return dayMap;
+                })
+                .toList();
+    }
+
+    private Map<String, String> idByUri(Map<String, RecipeCandidate> recipeById) {
+        Map<String, String> idByUri = new LinkedHashMap<>();
+        recipeById.forEach((id, recipe) -> idByUri.put(recipe.getUri(), id));
+        return idByUri;
     }
 
     private List<String> unresolvedIngredients(RecipeCandidate recipe) {
@@ -423,6 +769,7 @@ OUTPUT_SCHEMA:
     private List<String> keyIngredients(RecipeCandidate recipe) {
         if (recipe.getIngredients() == null) return List.of();
         return recipe.getIngredients().stream()
+                .sorted(Comparator.comparingInt(this::ingredientDisplayPriority))
                 .map(IngredientUse::getName)
                 .filter(Objects::nonNull)
                 .filter(name -> !name.isBlank())
@@ -430,30 +777,20 @@ OUTPUT_SCHEMA:
                 .toList();
     }
 
-    private List<String> inferMealHints(RecipeCandidate recipe) {
-        String text = normalizeText(recipe.getLabel() + " " + keyIngredients(recipe).stream().collect(Collectors.joining(" ")));
-        List<String> hints = new ArrayList<>();
-
-        if (containsAnyText(text, "egg", "oat", "pancake", "waffle", "toast", "breakfast", "yogurt", "smoothie")) {
-            hints.add("breakfast");
+    private int ingredientDisplayPriority(IngredientUse ingredient) {
+        String name = normalizeText(ingredient.getName());
+        if (name.isBlank()) return 5;
+        if (containsAnyText(name, "water")) return 4;
+        if (containsAnyText(name, "salt", "pepper", "spice", "seasoning", "cilantro", "parsley", "thyme", "oregano", "basil")) {
+            return 3;
         }
-        if (containsAnyText(text, "cookie", "cake", "ice cream", "pie", "brownie", "dessert", "sweet")) {
-            hints.add("dessert");
+        if (containsAnyText(name, "steak", "beef", "chicken", "turkey", "fish", "salmon", "tuna", "pork", "egg", "tofu", "bean", "lentil")) {
+            return 0;
         }
-        if (recipe.getCalories() < 350 || containsAnyText(text, "snack", "smoothie", "fruit")) {
-            hints.add("snack");
+        if (containsAnyText(name, "oil", "butter", "cream", "cheese", "nuts", "peanut", "rice", "pasta", "bread", "tortilla", "potato")) {
+            return 1;
         }
-        if (containsAnyText(text, "salad", "sandwich", "wrap", "taco", "bowl", "soup")) {
-            hints.add("lunch");
-        }
-        if (hints.isEmpty() || recipe.getCalories() >= 350) {
-            hints.add("dinner");
-        }
-        if (!hints.contains("lunch") && recipe.getCalories() >= 300 && recipe.getCalories() <= 900) {
-            hints.add("lunch");
-        }
-
-        return hints.stream().distinct().limit(3).toList();
+        return 2;
     }
 
     private MacroSummary macros(RecipeCandidate recipe) {
@@ -510,62 +847,6 @@ OUTPUT_SCHEMA:
         return clamp(rounded, 0.5, 2.0);
     }
 
-    private double parseQuantity(String value) {
-        if (value == null || value.isBlank()) return 0.0;
-        try {
-            String cleaned = value.trim().toLowerCase(Locale.ROOT)
-                    .replaceAll("[^0-9./\\s-]", " ")
-                    .trim();
-            if (cleaned.isBlank()) return 0.0;
-
-            String[] rangeParts = cleaned.split("\\s*-\\s*");
-            if (rangeParts.length == 2) {
-                double left = parseSingleQuantity(rangeParts[0]);
-                double right = parseSingleQuantity(rangeParts[1]);
-                if (left > 0 && right > 0) return (left + right) / 2.0;
-                return Math.max(left, right);
-            }
-
-            return parseSingleQuantity(cleaned);
-        } catch (Exception ignored) {
-            return 0.0;
-        }
-    }
-
-    private double parseSingleQuantity(String value) {
-        if (value == null || value.isBlank()) return 0.0;
-
-        String trimmed = value.trim();
-        if (trimmed.contains(" ")) {
-            double total = 0.0;
-            for (String part : trimmed.split("\\s+")) {
-                total += parseSingleQuantity(part);
-            }
-            return total;
-        }
-
-        if (trimmed.contains("/")) {
-            String[] fraction = trimmed.split("/");
-            if (fraction.length == 2) {
-                double numerator = safeParseDouble(fraction[0]);
-                double denominator = safeParseDouble(fraction[1]);
-                if (numerator > 0 && denominator > 0) return numerator / denominator;
-            }
-            return 0.0;
-        }
-
-        return safeParseDouble(trimmed.replaceAll("[^0-9.]", ""));
-    }
-
-    private double safeParseDouble(String value) {
-        try {
-            if (value == null || value.isBlank()) return 0.0;
-            return Double.parseDouble(value);
-        } catch (Exception ignored) {
-            return 0.0;
-        }
-    }
-
     private boolean containsAnyText(String text, String... needles) {
         if (text == null || text.isBlank()) return false;
         for (String needle : needles) {
@@ -575,7 +856,10 @@ OUTPUT_SCHEMA:
     }
 
     private String normalizeText(String value) {
-        return value == null ? "" : value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\s]", " ").replaceAll("\\s+", " ").trim();
+        return value == null ? "" : value.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9\\s]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
     }
 
     private String safe(String value) {
@@ -602,7 +886,6 @@ OUTPUT_SCHEMA:
 
     private record RawDailyMealPlan(
             int day,
-            String theme,
             List<RawPlannedMeal> meals,
             String dayRationale
     ) {}

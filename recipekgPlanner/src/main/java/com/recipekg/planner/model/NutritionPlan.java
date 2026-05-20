@@ -6,5 +6,6 @@ public record NutritionPlan(
         String goalStatus,
         String summary,
         List<DailyMealPlan> days,
-        MacroSummary weeklyTotals
+        MacroSummary weeklyTotals,
+        PlanningTrace planningTrace
 ) {}
