@@ -22,6 +22,8 @@ import com.recipekg.planner.service.ValidationBrainService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.ArrayList;
@@ -64,6 +66,9 @@ public class NutritionistAgentService {
 
     @Value("${nutritionist.max-repair-iterations:2}")
     private int maxRepairIterations;
+
+    @Value("${gemini.retry-503-attempts:2}")
+    private int retry503Attempts;
 
     public NutritionPlan generateSevenDayPlan(
             UserProfile profile,
@@ -201,7 +206,8 @@ public class NutritionistAgentService {
                         state,
                         iteration
                 );
-                NutritionistSelectionState rawState = parseSelectionState(callGemini(prompt));
+                String geminiResponse=callGemini(prompt);
+                NutritionistSelectionState rawState = parseSelectionState(geminiResponse);
                 state = batchSelectionService.normalizeState(rawState, allowedThisRound, shortlistSize);
             } catch (Exception e) {
                 System.err.println("Nutritionist batch selection failed: " + e.getMessage());
@@ -525,6 +531,50 @@ OUTPUT_SCHEMA:
     }
 
     private String callGemini(String prompt) {
+        int maxAttempts = Math.max(1, retry503Attempts + 1);
+        RuntimeException lastError = null;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return callGeminiOnce(prompt);
+            } catch (WebClientResponseException.ServiceUnavailable e) {
+                lastError = e;
+                if (attempt >= maxAttempts) break;
+
+                retryAfterDelay("Gemini returned 503 Service Unavailable", attempt, maxAttempts);
+            } catch (WebClientRequestException e) {
+                lastError = e;
+                if (attempt >= maxAttempts) break;
+
+                retryAfterDelay("Gemini request failed before receiving a response: " + rootCauseMessage(e), attempt, maxAttempts);
+            }
+        }
+
+        throw lastError == null ? new RuntimeException("Gemini request failed") : lastError;
+    }
+
+    private void retryAfterDelay(String reason, int attempt, int maxAttempts) {
+        long delayMillis = 1000L * attempt;
+        System.err.printf(
+                "%s; retrying attempt %d/%d after %dms.%n",
+                reason,
+                attempt + 1,
+                maxAttempts,
+                delayMillis
+        );
+        sleepBeforeRetry(delayMillis);
+    }
+
+    private String rootCauseMessage(Throwable throwable) {
+        Throwable current = throwable;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        String message = current.getMessage();
+        return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
+    }
+
+    private String callGeminiOnce(String prompt) {
         Map<String, Object> body = Map.of(
                 "contents", new Object[]{
                         Map.of("parts", new Object[]{Map.of("text", prompt)})
@@ -550,6 +600,15 @@ OUTPUT_SCHEMA:
                     .trim();
         } catch (Exception e) {
             throw new RuntimeException("Nutritionist agent response parse failed", e);
+        }
+    }
+
+    private void sleepBeforeRetry(long delayMillis) {
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting to retry Gemini request", e);
         }
     }
 

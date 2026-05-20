@@ -11,6 +11,8 @@ import com.recipekg.planner.repository.UserProfileRepository;
 import com.recipekg.planner.repository.UserRepository;
 import com.recipekg.planner.repository.WeeklyFeedbackRepository;
 import com.recipekg.planner.repository.WeeklyPlanRepository;
+import com.recipekg.planner.response.FrontendNutritionPlanResponse;
+import com.recipekg.planner.response.PantryResponse;
 import com.recipekg.planner.service.agents.AgentOrchestratorService;
 import com.recipekg.planner.service.agents.ProgressAgentService;
 import lombok.RequiredArgsConstructor;
@@ -30,6 +32,19 @@ public class PlannerService {
     private final WeeklyFeedbackRepository weeklyFeedbackRepository;
     private final ProgressAgentService progressAgentService;
     private final PlanParserService planParserService;
+    private final NutritionPlanResponseMapper nutritionPlanResponseMapper;
+
+    public FrontendNutritionPlanResponse generateNutritionPlan(Long userId) {
+        UserProfile profile = profileRepository.findByUserId(userId)
+                .orElseThrow();
+
+        PantryResponse pantryResponse = orchestrator.generateFullPlan(profile);
+
+        return nutritionPlanResponseMapper.toFrontend(
+                pantryResponse.getNutritionPlan(),
+                pantryResponse.getRecipes()
+        );
+    }
 
     public WeeklyPlan generateInitialPlan(Long userId) throws JsonProcessingException {
 

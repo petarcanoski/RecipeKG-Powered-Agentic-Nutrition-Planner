@@ -5,6 +5,7 @@ import com.recipekg.planner.model.User;
 import com.recipekg.planner.model.WeeklyPlan;
 import com.recipekg.planner.repository.UserRepository;
 import com.recipekg.planner.repository.WeeklyPlanRepository;
+import com.recipekg.planner.response.FrontendNutritionPlanResponse;
 import com.recipekg.planner.service.PlanAdaptationService;
 import com.recipekg.planner.service.PlannerService;
 import com.recipekg.planner.service.ProgramTimelineService;
@@ -24,8 +25,8 @@ public class PlannerController {
     private final UserRepository userRepository;
 
     @PostMapping("/generate/{userId}")
-    public WeeklyPlan generate(@PathVariable Long userId) throws JsonProcessingException {
-        return plannerService.generateInitialPlan(userId);
+    public FrontendNutritionPlanResponse generate(@PathVariable Long userId) {
+        return plannerService.generateNutritionPlan(userId);
     }
 
     @PostMapping("/next-week/{userId}")
