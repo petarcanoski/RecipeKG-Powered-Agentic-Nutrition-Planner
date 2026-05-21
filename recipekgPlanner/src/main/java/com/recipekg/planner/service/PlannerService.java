@@ -53,16 +53,14 @@ public class PlannerService {
                 pantryResponse.getRecipes()
         );
 
-        if (isSuccessfulNutritionPlan(nutritionPlan)) {
-            int weekNumber = resolveWeekNumber(user);
-            nutritionPlanPersistenceService.save(
-                    user,
-                    weekNumber,
-                    resolveStartDate(user, weekNumber),
-                    frontendResponse,
-                    NutritionPlanPersistenceService.RECIPE_KG_AGENT
-            );
-        }
+        int weekNumber = resolveWeekNumber(user);
+        nutritionPlanPersistenceService.save(
+                user,
+                weekNumber,
+                resolveStartDate(user, weekNumber),
+                frontendResponse,
+                NutritionPlanPersistenceService.RECIPE_KG_AGENT
+        );
 
         return frontendResponse;
     }
