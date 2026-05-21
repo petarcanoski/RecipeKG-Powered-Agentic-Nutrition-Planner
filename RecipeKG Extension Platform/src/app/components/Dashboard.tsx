@@ -6,6 +6,7 @@ import {
   Loader2,
   Settings,
   Sparkles,
+  Trophy,
   UserRound,
 } from "lucide-react";
 import { Link } from "react-router";
@@ -81,6 +82,22 @@ type CurrentNutritionPlanResponse = {
   message: string;
   jobId: string | null;
   nutritionPlan: NutritionPlanResponse | null;
+};
+
+type VoteWinner = "RECIPE_KG" | "GEMINI" | "TIE";
+
+type PlanComparisonScore = {
+  recipeKgWins: number;
+  geminiWins: number;
+  ties: number;
+  totalVotes: number;
+};
+
+type PlanComparisonVoteResponse = {
+  id: number;
+  winner: VoteWinner;
+  reason: string | null;
+  message: string;
 };
 
 const placeholderProfile: ProfileParameter[] = [
@@ -464,12 +481,113 @@ function GeminiPlaceholderResult({ message }: { message: string }) {
   );
 }
 
+function PlanComparisonVotePanel({
+  selectedWinner,
+  reason,
+  score,
+  isSubmitting,
+  message,
+  onSelectWinner,
+  onReasonChange,
+  onSubmit,
+}: {
+  selectedWinner: VoteWinner | "";
+  reason: string;
+  score: PlanComparisonScore | null;
+  isSubmitting: boolean;
+  message: string;
+  onSelectWinner: (winner: VoteWinner) => void;
+  onReasonChange: (reason: string) => void;
+  onSubmit: () => void;
+}) {
+  const options: Array<{ label: string; value: VoteWinner }> = [
+    { label: "RecipeKG is better", value: "RECIPE_KG" },
+    { label: "Gemini is better", value: "GEMINI" },
+    { label: "Tie", value: "TIE" },
+  ];
+
+  return (
+    <Card>
+      <CardHeader className="border-b">
+        <div className="flex items-center gap-2">
+          <Trophy className="h-5 w-5 text-blue-600" />
+          <div>
+            <CardTitle className="text-lg">Vote on the better plan</CardTitle>
+            <CardDescription>
+              Choose the plan that looks more useful, realistic, and safe for the user profile.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4 p-5">
+        {score && (
+          <div className="grid gap-3 sm:grid-cols-4">
+            <div className="rounded-md border bg-gray-50 px-3 py-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">RecipeKG</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{score.recipeKgWins}</p>
+            </div>
+            <div className="rounded-md border bg-gray-50 px-3 py-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Gemini</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{score.geminiWins}</p>
+            </div>
+            <div className="rounded-md border bg-gray-50 px-3 py-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Ties</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{score.ties}</p>
+            </div>
+            <div className="rounded-md border bg-gray-50 px-3 py-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Total</p>
+              <p className="mt-1 text-lg font-semibold text-gray-900">{score.totalVotes}</p>
+            </div>
+          </div>
+        )}
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          {options.map((option) => (
+            <Button
+              key={option.value}
+              type="button"
+              variant={selectedWinner === option.value ? "default" : "outline"}
+              onClick={() => onSelectWinner(option.value)}
+            >
+              {option.label}
+            </Button>
+          ))}
+        </div>
+
+        <Textarea
+          value={reason}
+          onChange={(event) => onReasonChange(event.target.value)}
+          placeholder="Optional reason for your vote"
+          className="min-h-[90px]"
+        />
+
+        {message && (
+          <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+            {message}
+          </div>
+        )}
+
+        <Button onClick={onSubmit} disabled={isSubmitting || !selectedWinner}>
+          {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trophy className="h-4 w-4" />}
+          Submit vote
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function Dashboard() {
   const { profile, account, isProfileLoading } = useAuth();
   const [generatedPlan, setGeneratedPlan] =
     useState<NutritionPlanResponse | null>(null);
   const [generatedGeminiPlan, setGeneratedGeminiPlan] =
     useState<NutritionPlanResponse | null>(null);
+  const [selectedWinner, setSelectedWinner] = useState<VoteWinner | "">("");
+  const [voteReason, setVoteReason] = useState("");
+  const [voteMessage, setVoteMessage] = useState("");
+  const [isVoteSubmitting, setIsVoteSubmitting] = useState(false);
+  const [comparisonScore, setComparisonScore] =
+    useState<PlanComparisonScore | null>(null);
   const [activeRecipeKgJobId, setActiveRecipeKgJobId] = useState<string | null>(
     null,
   );
@@ -516,6 +634,23 @@ export function Dashboard() {
     geminiState.status === "idle" &&
     !generatedPlan &&
     !generatedGeminiPlan;
+
+  async function fetchComparisonScore() {
+    try {
+      const response = await fetch("http://localhost:8080/api/comparisons/score");
+      if (!response.ok) {
+        return;
+      }
+
+      setComparisonScore((await response.json()) as PlanComparisonScore);
+    } catch {
+      setComparisonScore(null);
+    }
+  }
+
+  useEffect(() => {
+    void fetchComparisonScore();
+  }, []);
 
   function stopPolling() {
     if (pollingTimeoutRef.current !== null) {
@@ -688,10 +823,10 @@ export function Dashboard() {
 
     const controller = new AbortController();
 
-    async function fetchCurrentPlan() {
+    async function fetchCurrentRecipeKgPlan() {
       try {
         const response = await fetch(
-          `http://localhost:8080/api/planner/nutrition-plan/current/${account.id}`,
+          `http://localhost:8080/api/planner/nutrition-plan/current/${account.id}?generatedBy=RECIPE_KG_AGENT`,
           { signal: controller.signal },
         );
 
@@ -726,7 +861,49 @@ export function Dashboard() {
       }
     }
 
-    void fetchCurrentPlan();
+    async function fetchCurrentGeminiPlan() {
+      try {
+        const response = await fetch(
+          `http://localhost:8080/api/planner/nutrition-plan/current/${account.id}?generatedBy=DIRECT_GEMINI`,
+          { signal: controller.signal },
+        );
+
+        if (!response.ok) {
+          throw new Error("Current Gemini plan lookup failed");
+        }
+
+        const current = (await response.json()) as CurrentNutritionPlanResponse;
+
+        if (current.status === "COMPLETED" && current.nutritionPlan) {
+          setGeneratedGeminiPlan(current.nutritionPlan);
+          setGeminiState({
+            status: "sent",
+            message: current.message || "Loaded saved Gemini plan.",
+          });
+          return;
+        }
+
+        if (current.status === "NOT_FOUND") {
+          setGeneratedGeminiPlan(null);
+          setGeminiState({
+            status: "idle",
+            message: "",
+          });
+        }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setGeminiState({
+          status: "idle",
+          message: "",
+        });
+      }
+    }
+
+    void fetchCurrentRecipeKgPlan();
+    void fetchCurrentGeminiPlan();
 
     return () => {
       controller.abort();
@@ -778,6 +955,41 @@ export function Dashboard() {
         message:
           "Unable to generate the direct Gemini plan. Make sure the backend is running on port 8080.",
       });
+    }
+  }
+
+  async function submitComparisonVote() {
+    if (!account?.id || !selectedWinner) {
+      return;
+    }
+
+    setIsVoteSubmitting(true);
+    setVoteMessage("");
+
+    try {
+      const response = await fetch("http://localhost:8080/api/comparisons/vote", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          userId: account.id,
+          winner: selectedWinner,
+          reason: voteReason,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Vote failed");
+      }
+
+      const savedVote = (await response.json()) as PlanComparisonVoteResponse;
+      setVoteMessage(savedVote.message || "Vote saved.");
+      await fetchComparisonScore();
+    } catch {
+      setVoteMessage("Unable to save your vote. Make sure both plans were generated and saved.");
+    } finally {
+      setIsVoteSubmitting(false);
     }
   }
 
@@ -902,6 +1114,19 @@ export function Dashboard() {
           }
         />
       </div>
+
+      {generatedPlan && generatedGeminiPlan && (
+        <PlanComparisonVotePanel
+          selectedWinner={selectedWinner}
+          reason={voteReason}
+          score={comparisonScore}
+          isSubmitting={isVoteSubmitting}
+          message={voteMessage}
+          onSelectWinner={setSelectedWinner}
+          onReasonChange={setVoteReason}
+          onSubmit={submitComparisonVote}
+        />
+      )}
     </div>
   );
 }

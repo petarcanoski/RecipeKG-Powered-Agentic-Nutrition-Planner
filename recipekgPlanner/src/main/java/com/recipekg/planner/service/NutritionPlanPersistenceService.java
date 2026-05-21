@@ -98,6 +98,11 @@ public class NutritionPlanPersistenceService {
                 .map(this::toFrontendResponse);
     }
 
+    @Transactional(readOnly = true)
+    public Optional<NutritionPlanEntity> findLatestEntityByUserAndGeneratedBy(Long userId, String generatedBy) {
+        return nutritionPlanRepository.findTopByUserIdAndGeneratedByOrderByWeekNumberDescUpdatedAtDesc(userId, normalizeGeneratedBy(generatedBy));
+    }
+
     private FrontendNutritionPlanResponse toFrontendResponse(NutritionPlanEntity plan) {
         List<FrontendDailyNutritionPlanResponse> days = plan.getDays() == null
                 ? List.of()
