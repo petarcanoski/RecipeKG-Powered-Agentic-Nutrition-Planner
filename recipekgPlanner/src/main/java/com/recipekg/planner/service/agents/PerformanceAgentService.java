@@ -36,10 +36,11 @@ public class PerformanceAgentService {
             }
         } catch (Exception e) {
             System.err.println("Performance agent failed; using deterministic fallback: " + e.getMessage());
-        }
 
-        MacroCalculatorService.MacroTargets targets = macroCalculatorService.calculate(profile);
-        return fallbackManifest(profile, targets);
+        }
+        return null;
+//        MacroCalculatorService.MacroTargets targets = macroCalculatorService.calculate(profile);
+//        return fallbackManifest(profile, targets);
     }
 
     private String buildPrompt(UserProfile profile, MedicalManifest medicalManifest) {

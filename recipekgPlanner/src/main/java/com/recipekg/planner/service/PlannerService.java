@@ -22,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.util.Objects;
+import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor
@@ -63,6 +64,19 @@ public class PlannerService {
         }
 
         return frontendResponse;
+    }
+
+    public Optional<FrontendNutritionPlanResponse> getCurrentNutritionPlan(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow();
+
+        int weekNumber = resolveWeekNumber(user);
+        Optional<FrontendNutritionPlanResponse> currentWeekPlan =
+                nutritionPlanPersistenceService.findByUserWeek(userId, weekNumber);
+
+        return currentWeekPlan.isPresent()
+                ? currentWeekPlan
+                : nutritionPlanPersistenceService.findLatestByUser(userId);
     }
 
     public WeeklyPlan generateInitialPlan(Long userId) throws JsonProcessingException {

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
   CalendarDays,
@@ -30,6 +30,8 @@ type PanelState = {
   status: "idle" | "loading" | "sent";
   message: string;
 };
+
+type NutritionPlanJobStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 
 type MacroSummary = {
   calories: number;
@@ -63,6 +65,23 @@ type NutritionPlanResponse = {
   weeklyTotals: MacroSummary;
 };
 
+type NutritionPlanJobResponse = {
+  jobId: string;
+  userId: number;
+  status: NutritionPlanJobStatus;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  nutritionPlan: NutritionPlanResponse | null;
+};
+
+type CurrentNutritionPlanResponse = {
+  status: NutritionPlanJobStatus | "NOT_FOUND";
+  message: string;
+  jobId: string | null;
+  nutritionPlan: NutritionPlanResponse | null;
+};
+
 const placeholderProfile: ProfileParameter[] = [
   { label: "Name", value: "Not loaded" },
   { label: "Surname", value: "Not loaded" },
@@ -91,8 +110,6 @@ const accountProfileKeys: Partial<Record<string, string>> = {
   Diseases: "diseases",
 };
 
-const testNutritionPlanEndpoint = "http://localhost:8080/test-nutrition-plan";
-
 const recipeKgLoadingMessages = [
   "Gathering user profile information",
   "Checking allergies and medical constraints",
@@ -103,6 +120,9 @@ const recipeKgLoadingMessages = [
   "Composing the weekly nutrition plan",
   "Preparing the result",
 ];
+
+const recipeKgLoadingMessageIntervalMs = 6000;
+const recipeKgPollingIntervalMs = 4000;
 
 function buildGeminiPrompt(parameters: ProfileParameter[]) {
   const profileLines = parameters
@@ -237,7 +257,10 @@ function GeneratedPlan({ plan }: { plan: NutritionPlanResponse }) {
             const isOpen = openDay === day.day;
 
             return (
-              <div key={day.day} className="overflow-hidden rounded-md border bg-white">
+              <div
+                key={day.day}
+                className="overflow-hidden rounded-md border bg-white"
+              >
                 <button
                   type="button"
                   onClick={() => setOpenDay(isOpen ? 0 : day.day)}
@@ -260,7 +283,10 @@ function GeneratedPlan({ plan }: { plan: NutritionPlanResponse }) {
 
                     <div className="grid gap-4">
                       {day.meals.map((meal) => (
-                        <div key={`${day.day}-${meal.slot}`} className="rounded-md border bg-gray-50 p-4">
+                        <div
+                          key={`${day.day}-${meal.slot}`}
+                          className="rounded-md border bg-gray-50 p-4"
+                        >
                           <div className="flex items-start justify-between gap-3">
                             <div>
                               <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
@@ -275,10 +301,14 @@ function GeneratedPlan({ plan }: { plan: NutritionPlanResponse }) {
                             </span>
                           </div>
 
-                          <p className="mt-3 text-sm text-gray-600">{meal.reason}</p>
+                          <p className="mt-3 text-sm text-gray-600">
+                            {meal.reason}
+                          </p>
 
                           <div className="mt-4">
-                            <p className="text-sm font-medium text-gray-900">Ingredients</p>
+                            <p className="text-sm font-medium text-gray-900">
+                              Ingredients
+                            </p>
                             <ul className="mt-2 space-y-1 text-sm text-gray-600">
                               {meal.ingredients.map((ingredient) => (
                                 <li key={ingredient}>{ingredient}</li>
@@ -326,6 +356,9 @@ function RecipeKgLoading({ message }: { message: string }) {
           Generating RecipeKG plan
         </p>
         <p className="text-sm text-gray-600">{message}</p>
+        <p className="text-sm font-medium text-gray-700">
+          This can take up to 20 minutes.
+        </p>
       </div>
     </div>
   );
@@ -345,8 +378,12 @@ function GeminiPlaceholderResult({ message }: { message: string }) {
 }
 
 export function Dashboard() {
-  const { profile, isProfileLoading } = useAuth();
-  const [generatedPlan, setGeneratedPlan] = useState<NutritionPlanResponse | null>(null);
+  const { profile, account, isProfileLoading } = useAuth();
+  const [generatedPlan, setGeneratedPlan] =
+    useState<NutritionPlanResponse | null>(null);
+  const [activeRecipeKgJobId, setActiveRecipeKgJobId] = useState<string | null>(
+    null,
+  );
   const [recipeKgState, setRecipeKgState] = useState<PanelState>({
     status: "idle",
     message: "",
@@ -355,6 +392,9 @@ export function Dashboard() {
     status: "idle",
     message: "",
   });
+  const pollingTimeoutRef = useRef<number | null>(null);
+  const pollingAbortRef = useRef<AbortController | null>(null);
+  const loadingMessageIntervalRef = useRef<number | null>(null);
 
   const profileParameters = useMemo(() => {
     return placeholderProfile.map((parameter) => {
@@ -383,50 +423,231 @@ export function Dashboard() {
     [profileParameters],
   );
   const shouldMatchPanelHeights =
-    recipeKgState.status === "idle" && geminiState.status === "idle" && !generatedPlan;
+    recipeKgState.status === "idle" &&
+    geminiState.status === "idle" &&
+    !generatedPlan;
 
-  async function generateRecipeKgPlan() {
-    setGeneratedPlan(null);
+  function stopPolling() {
+    if (pollingTimeoutRef.current !== null) {
+      window.clearTimeout(pollingTimeoutRef.current);
+      pollingTimeoutRef.current = null;
+    }
+
+    pollingAbortRef.current?.abort();
+    pollingAbortRef.current = null;
+  }
+
+  function stopLoadingMessages() {
+    if (loadingMessageIntervalRef.current !== null) {
+      window.clearInterval(loadingMessageIntervalRef.current);
+      loadingMessageIntervalRef.current = null;
+    }
+  }
+
+  function startLoadingMessages(initialMessage: string) {
+    stopLoadingMessages();
+
     setRecipeKgState({
       status: "loading",
-      message: recipeKgLoadingMessages[0],
+      message: initialMessage,
     });
 
-    let messageIndex = 0;
-    const intervalId = window.setInterval(() => {
+    let messageIndex = recipeKgLoadingMessages.indexOf(initialMessage);
+    if (messageIndex < 0) {
+      messageIndex = 0;
+    }
+
+    loadingMessageIntervalRef.current = window.setInterval(() => {
       messageIndex = (messageIndex + 1) % recipeKgLoadingMessages.length;
       setRecipeKgState({
         status: "loading",
         message: recipeKgLoadingMessages[messageIndex],
       });
-    }, 900);
+    }, recipeKgLoadingMessageIntervalMs);
+  }
+
+  function finishRecipeKgJob(message: string, plan: NutritionPlanResponse) {
+    stopPolling();
+    stopLoadingMessages();
+    setActiveRecipeKgJobId(null);
+    setGeneratedPlan(plan);
+    setRecipeKgState({
+      status: "sent",
+      message,
+    });
+  }
+
+  function failRecipeKgJob(message: string) {
+    stopPolling();
+    stopLoadingMessages();
+    setActiveRecipeKgJobId(null);
+    setRecipeKgState({
+      status: "sent",
+      message,
+    });
+  }
+
+  function scheduleRecipeKgPoll(jobId: string) {
+    pollingTimeoutRef.current = window.setTimeout(() => {
+      void pollRecipeKgJob(jobId);
+    }, recipeKgPollingIntervalMs);
+  }
+
+  async function pollRecipeKgJob(jobId: string) {
+    stopPolling();
+
+    const controller = new AbortController();
+    pollingAbortRef.current = controller;
 
     try {
-      const response = await fetch(testNutritionPlanEndpoint);
+      const response = await fetch(
+        `http://localhost:8080/api/planner/generate/status/${jobId}`,
+        { signal: controller.signal },
+      );
+
+      if (!response.ok) {
+        throw new Error("Polling failed");
+      }
+
+      const job = (await response.json()) as NutritionPlanJobResponse;
+      pollingAbortRef.current = null;
+
+      if (job.status === "COMPLETED" && job.nutritionPlan) {
+        finishRecipeKgJob(job.message || "RecipeKG plan generated successfully.", job.nutritionPlan);
+        return;
+      }
+
+      if (job.status === "FAILED") {
+        failRecipeKgJob(job.message || "RecipeKG plan generation failed.");
+        return;
+      }
+
+      setActiveRecipeKgJobId(job.jobId);
+      setRecipeKgState({
+        status: "loading",
+        message: job.message || recipeKgLoadingMessages[0],
+      });
+      scheduleRecipeKgPoll(job.jobId);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      pollingAbortRef.current = null;
+      failRecipeKgJob("Unable to poll the RecipeKG job status. Make sure the backend is running on port 8080.");
+    }
+  }
+
+  function continueRecipeKgJob(jobId: string, message?: string) {
+    setActiveRecipeKgJobId(jobId);
+    startLoadingMessages(message || recipeKgLoadingMessages[0]);
+    scheduleRecipeKgPoll(jobId);
+  }
+
+  async function generateRecipeKgPlan() {
+    if (recipeKgState.status === "loading" || activeRecipeKgJobId) {
+      return;
+    }
+
+    if (!account?.id) {
+      setRecipeKgState({
+        status: "sent",
+        message: "Unable to start generation because the current user id is missing.",
+      });
+      return;
+    }
+
+    setGeneratedPlan(null);
+    stopPolling();
+    startLoadingMessages(recipeKgLoadingMessages[0]);
+
+    try {
+      const response = await fetch(
+        `http://localhost:8080/api/planner/generate/${account?.id}`,
+        {
+          method: "POST",
+        },
+      );
 
       if (!response.ok) {
         throw new Error("Request failed");
       }
 
-      const plan = (await response.json()) as NutritionPlanResponse;
-      window.clearInterval(intervalId);
+      const job = (await response.json()) as NutritionPlanJobResponse;
 
-      setRecipeKgState({
-        status: "sent",
-        message: "RecipeKG plan generated successfully.",
-      });
-      setGeneratedPlan(plan);
+      if (job.status === "COMPLETED" && job.nutritionPlan) {
+        finishRecipeKgJob(job.message || "RecipeKG plan generated successfully.", job.nutritionPlan);
+        return;
+      }
+
+      if (job.status === "FAILED") {
+        failRecipeKgJob(job.message || "RecipeKG plan generation failed.");
+        return;
+      }
+
+      continueRecipeKgJob(job.jobId, job.message);
     } catch {
-      window.clearInterval(intervalId);
-      setRecipeKgState({
-        status: "sent",
-        message: "Unable to generate the RecipeKG test plan. Make sure the backend is running on port 8080.",
-      });
+      failRecipeKgJob("Unable to start RecipeKG generation. Make sure the backend is running on port 8080.");
     }
   }
 
+  useEffect(() => {
+    if (!account?.id) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    async function fetchCurrentPlan() {
+      try {
+        const response = await fetch(
+          `http://localhost:8080/api/planner/nutrition-plan/current/${account.id}`,
+          { signal: controller.signal },
+        );
+
+        if (!response.ok) {
+          throw new Error("Current plan lookup failed");
+        }
+
+        const current = (await response.json()) as CurrentNutritionPlanResponse;
+
+        if (current.status === "COMPLETED" && current.nutritionPlan) {
+          finishRecipeKgJob(current.message || "Loaded saved RecipeKG plan.", current.nutritionPlan);
+          return;
+        }
+
+        if ((current.status === "PENDING" || current.status === "RUNNING") && current.jobId) {
+          continueRecipeKgJob(current.jobId, current.message);
+          return;
+        }
+
+        if (current.status === "FAILED") {
+          failRecipeKgJob(current.message || "The last RecipeKG generation failed.");
+        }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setRecipeKgState({
+          status: "idle",
+          message: "",
+        });
+      }
+    }
+
+    void fetchCurrentPlan();
+
+    return () => {
+      controller.abort();
+      stopPolling();
+      stopLoadingMessages();
+    };
+  }, [account?.id]);
+
   function sendGeminiPlaceholder() {
-    const doneMessage = "Placeholder request prepared for the Gemini comparison controller.";
+    const doneMessage =
+      "Placeholder request prepared for the Gemini comparison controller.";
 
     setGeminiState({
       status: "loading",
@@ -508,9 +729,9 @@ export function Dashboard() {
                 allergies, diseases, blood type, goal, and activity level as
                 hard constraints. A food scientist agent then queries our
                 GraphDB recipe knowledge graph for safe candidate meals. The
-                nutrition planner estimates servings, balances macros across
-                the week, and composes a structured plan with meals,
-                ingredients, rationale, and nutrition totals.
+                nutrition planner estimates servings, balances macros across the
+                week, and composes a structured plan with meals, ingredients,
+                rationale, and nutrition totals.
               </p>
               <p>
                 This makes the RecipeKG run traceable: every generated plan is

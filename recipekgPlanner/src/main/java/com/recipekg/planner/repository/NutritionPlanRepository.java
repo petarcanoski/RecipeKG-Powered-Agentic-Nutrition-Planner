@@ -8,4 +8,6 @@ import java.util.Optional;
 public interface NutritionPlanRepository extends JpaRepository<NutritionPlanEntity, Long> {
 
     Optional<NutritionPlanEntity> findByUserIdAndWeekNumber(Long userId, Integer weekNumber);
+
+    Optional<NutritionPlanEntity> findTopByUserIdOrderByWeekNumberDesc(Long userId);
 }

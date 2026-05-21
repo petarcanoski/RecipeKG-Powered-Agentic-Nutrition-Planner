@@ -1,6 +1,7 @@
 package com.recipekg.planner.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.recipekg.planner.model.MacroSummary;
 import com.recipekg.planner.model.NutritionPlanDayEntity;
@@ -16,14 +17,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor
 public class NutritionPlanPersistenceService {
 
     private final NutritionPlanRepository nutritionPlanRepository;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Transactional
     public NutritionPlanEntity save(
@@ -52,6 +55,82 @@ public class NutritionPlanPersistenceService {
         }
 
         return nutritionPlanRepository.save(plan);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<FrontendNutritionPlanResponse> findByUserWeek(Long userId, int weekNumber) {
+        return nutritionPlanRepository.findByUserIdAndWeekNumber(userId, weekNumber)
+                .map(this::toFrontendResponse);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<FrontendNutritionPlanResponse> findLatestByUser(Long userId) {
+        return nutritionPlanRepository.findTopByUserIdOrderByWeekNumberDesc(userId)
+                .map(this::toFrontendResponse);
+    }
+
+    private FrontendNutritionPlanResponse toFrontendResponse(NutritionPlanEntity plan) {
+        List<FrontendDailyNutritionPlanResponse> days = plan.getDays() == null
+                ? List.of()
+                : plan.getDays().stream()
+                .sorted(Comparator.comparing(NutritionPlanDayEntity::getDayNumber))
+                .map(this::toFrontendDay)
+                .toList();
+
+        return new FrontendNutritionPlanResponse(
+                plan.getGoalStatus(),
+                plan.getSummary(),
+                days,
+                new MacroSummary(
+                        safeDouble(plan.getWeeklyCalories()),
+                        safeDouble(plan.getWeeklyProtein()),
+                        safeDouble(plan.getWeeklyCarbs()),
+                        safeDouble(plan.getWeeklyFat()),
+                        safeDouble(plan.getWeeklySugar()),
+                        safeDouble(plan.getWeeklySodium())
+                )
+        );
+    }
+
+    private FrontendDailyNutritionPlanResponse toFrontendDay(NutritionPlanDayEntity day) {
+        List<FrontendMealPlanResponse> meals = day.getMeals() == null
+                ? List.of()
+                : day.getMeals().stream()
+                .sorted(Comparator.comparing(NutritionPlanMealEntity::getSortOrder))
+                .map(this::toFrontendMeal)
+                .toList();
+
+        return new FrontendDailyNutritionPlanResponse(
+                day.getDayNumber(),
+                meals,
+                new MacroSummary(
+                        safeDouble(day.getTotalCalories()),
+                        safeDouble(day.getTotalProtein()),
+                        safeDouble(day.getTotalCarbs()),
+                        safeDouble(day.getTotalFat()),
+                        safeDouble(day.getTotalSugar()),
+                        safeDouble(day.getTotalSodium())
+                ),
+                day.getRationale()
+        );
+    }
+
+    private FrontendMealPlanResponse toFrontendMeal(NutritionPlanMealEntity meal) {
+        return new FrontendMealPlanResponse(
+                meal.getSlot(),
+                meal.getRecipeName(),
+                readIngredients(meal.getIngredientsJson()),
+                safeDouble(meal.getServings()),
+                new MacroSummary(
+                        safeDouble(meal.getCalories()),
+                        safeDouble(meal.getProtein()),
+                        safeDouble(meal.getCarbs()),
+                        safeDouble(meal.getFat()),
+                        safeDouble(meal.getSugar()),
+                        safeDouble(meal.getSodium())
+                ),
+                meal.getReason()
+        );
     }
 
     private NutritionPlanDayEntity toDayEntity(
@@ -128,5 +207,21 @@ public class NutritionPlanPersistenceService {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Failed to serialize nutrition plan ingredients", e);
         }
+    }
+
+    private List<String> readIngredients(String ingredientsJson) {
+        if (ingredientsJson == null || ingredientsJson.isBlank()) {
+            return List.of();
+        }
+
+        try {
+            return objectMapper.readValue(ingredientsJson, new TypeReference<>() {});
+        } catch (JsonProcessingException e) {
+            return List.of();
+        }
+    }
+
+    private double safeDouble(Double value) {
+        return value == null ? 0.0 : value;
     }
 }

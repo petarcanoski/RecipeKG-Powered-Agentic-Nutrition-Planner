@@ -7,6 +7,8 @@ import com.recipekg.planner.model.DailyMealPlan;
 import com.recipekg.planner.model.IngredientUse;
 import com.recipekg.planner.model.MacroSummary;
 import com.recipekg.planner.model.MedicalManifest;
+import com.recipekg.planner.model.NutrientCap;
+import com.recipekg.planner.model.NutrientTarget;
 import com.recipekg.planner.model.NutritionPlan;
 import com.recipekg.planner.model.NutritionistSelectionState;
 import com.recipekg.planner.model.PerformanceManifest;
@@ -16,6 +18,7 @@ import com.recipekg.planner.model.PlanningTrace;
 import com.recipekg.planner.model.RecipeBrief;
 import com.recipekg.planner.model.RecipeCandidate;
 import com.recipekg.planner.model.UserProfile;
+import com.recipekg.planner.model.ValidationIssue;
 import com.recipekg.planner.model.ValidationResult;
 import com.recipekg.planner.service.NutritionistBatchSelectionService;
 import com.recipekg.planner.service.ValidationBrainService;
@@ -64,11 +67,17 @@ public class NutritionistAgentService {
     @Value("${nutritionist.repair-recipe-limit:30}")
     private int repairRecipeLimit;
 
-    @Value("${nutritionist.max-repair-iterations:2}")
+    @Value("${nutritionist.max-repair-iterations:3}")
     private int maxRepairIterations;
 
-    @Value("${gemini.retry-503-attempts:2}")
+    @Value("${gemini.retry-503-attempts:5}")
     private int retry503Attempts;
+
+    @Value("${gemini.retry-base-delay-ms:10000}")
+    private long retryBaseDelayMillis;
+
+    @Value("${gemini.retry-max-delay-ms:90000}")
+    private long retryMaxDelayMillis;
 
     public NutritionPlan generateSevenDayPlan(
             UserProfile profile,
@@ -422,6 +431,9 @@ OUTPUT_SCHEMA:
 
 TASK:
 Build the final 7-day plan from the shortlisted recipes.
+Variety target: use at least 18 unique recipe IDs across the week when the shortlist contains 18 or more recipes.
+If the shortlist has fewer than 18 recipes, use as many distinct recipes as practical.
+Use fewer than 18 unique recipes only when necessary to satisfy mandatory medical constraints.
 Before returning JSON, count recipeId usage across the whole week. No recipe may appear more than 2 times.
 """;
     }
@@ -436,6 +448,12 @@ Before returning JSON, count recipeId usage across the whole week. No recipe may
     ) throws Exception {
         String currentPlanJson = mapper.writeValueAsString(compactPlan(currentPlan));
         String validationJson = mapper.writeValueAsString(validationResult);
+        String repairGuidanceJson = mapper.writeValueAsString(repairGuidance(
+                currentPlan,
+                validationResult,
+                performanceManifest,
+                medicalManifest
+        ));
 
         return planningBasePrompt(profile, medicalManifest, performanceManifest, briefs) + """
 
@@ -445,16 +463,174 @@ CURRENT_PLAN:
 VALIDATION_ISSUES:
 %s
 
+NUMERIC_REPAIR_GUIDANCE:
+%s
+
 TASK:
 Repair the current plan while changing as little as possible.
-Prioritize HIGH severity issues.
+Priority order:
+1. Never exceed medical nutrient caps.
+2. Keep breakfast, lunch, and dinner present.
+3. Hit at least the validated minimum calories and protein.
+4. Minimize recipe repetition and preserve variety.
+
+Use NUMERIC_REPAIR_GUIDANCE to repair precisely:
+- For medical cap excesses, reduce the listed excess amount while keeping calories/protein adequate.
+- For calorie/protein deficits, add at least the listed deficit using recipes that do not create new cap excesses.
+- Keep days listed under passingDays unchanged.
+- Only change passing days if a global issue, such as recipe repetition, cannot be fixed any other way.
 AVAILABLE_RECIPE_CANDIDATES includes the current plan recipes plus replacement options.
+Variety target: when AVAILABLE_RECIPE_CANDIDATES has 18 or more recipes, use at least 18 unique recipe IDs across the repaired week.
+If AVAILABLE_RECIPE_CANDIDATES has 30 or more recipes, prefer 18 to 24 unique recipe IDs.
+Do not collapse the repaired plan to a small recipe subset unless that is the only way to satisfy medical caps.
 Keep non-problem meals when they still fit, but replace enough repeated meals to satisfy every validation issue.
 Hard constraint: no recipeId may appear more than 2 times in the returned week. There are no exceptions.
 If the current plan has 4 meals/day and repetition is hard to fix, use 3 meals/day on some days instead of repeating recipes.
 Before returning JSON, count recipeId usage across the whole week and fix any count above 2.
 Return the complete corrected 7-day plan, not a patch.
-""".formatted(currentPlanJson, validationJson);
+""".formatted(currentPlanJson, validationJson, repairGuidanceJson);
+    }
+
+    private Map<String, Object> repairGuidance(
+            NutritionPlan currentPlan,
+            ValidationResult validationResult,
+            PerformanceManifest performanceManifest,
+            MedicalManifest medicalManifest
+    ) {
+        Set<Integer> problemDays = validationResult == null || validationResult.issues() == null
+                ? Set.of()
+                : validationResult.issues().stream()
+                .map(ValidationIssue::day)
+                .filter(day -> day > 0)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+
+        List<Integer> passingDays = currentPlan == null || currentPlan.days() == null
+                ? List.of()
+                : currentPlan.days().stream()
+                .map(DailyMealPlan::day)
+                .filter(day -> !problemDays.contains(day))
+                .toList();
+
+        List<Map<String, Object>> dayGuidance = currentPlan == null || currentPlan.days() == null
+                ? List.of()
+                : currentPlan.days().stream()
+                .filter(day -> problemDays.contains(day.day()))
+                .map(day -> dayRepairGuidance(day, validationResult, performanceManifest, medicalManifest))
+                .toList();
+
+        List<ValidationIssue> globalIssues = validationResult == null || validationResult.issues() == null
+                ? List.of()
+                : validationResult.issues().stream()
+                .filter(issue -> issue.day() <= 0)
+                .toList();
+
+        return Map.of(
+                "passingDays", passingDays,
+                "problemDays", dayGuidance,
+                "globalIssues", globalIssues
+        );
+    }
+
+    private Map<String, Object> dayRepairGuidance(
+            DailyMealPlan day,
+            ValidationResult validationResult,
+            PerformanceManifest performanceManifest,
+            MedicalManifest medicalManifest
+    ) {
+        MacroSummary totals = day.estimatedTotals() == null ? MacroSummary.zero() : day.estimatedTotals();
+        List<ValidationIssue> dayIssues = validationResult == null || validationResult.issues() == null
+                ? List.of()
+                : validationResult.issues().stream()
+                .filter(issue -> issue.day() == day.day())
+                .toList();
+
+        return Map.of(
+                "day", day.day(),
+                "currentTotals", totals,
+                "validationIssues", dayIssues,
+                "performanceDeficits", performanceDeficits(totals, performanceManifest),
+                "medicalCapExcesses", medicalCapExcesses(totals, medicalManifest)
+        );
+    }
+
+    private List<Map<String, Object>> performanceDeficits(
+            MacroSummary totals,
+            PerformanceManifest performanceManifest
+    ) {
+        if (performanceManifest == null || performanceManifest.dailyTargets() == null) {
+            return List.of();
+        }
+
+        List<Map<String, Object>> deficits = new ArrayList<>();
+        addTargetDeficit(deficits, totals.calories(), target(performanceManifest, "calories"));
+        addTargetDeficit(deficits, totals.protein(), target(performanceManifest, "protein"));
+        return deficits;
+    }
+
+    private void addTargetDeficit(
+            List<Map<String, Object>> deficits,
+            double currentValue,
+            NutrientTarget target
+    ) {
+        if (target == null || target.min() == null || currentValue >= target.min()) {
+            return;
+        }
+
+        deficits.add(Map.of(
+                "nutrient", safe(target.nutrient()),
+                "current", round(currentValue),
+                "minimum", round(target.min()),
+                "deficit", round(target.min() - currentValue),
+                "unit", target.unit() == null ? "" : target.unit()
+        ));
+    }
+
+    private List<Map<String, Object>> medicalCapExcesses(
+            MacroSummary totals,
+            MedicalManifest medicalManifest
+    ) {
+        if (medicalManifest == null
+                || medicalManifest.constraints() == null
+                || medicalManifest.constraints().nutrientCaps() == null) {
+            return List.of();
+        }
+
+        List<Map<String, Object>> excesses = new ArrayList<>();
+        for (NutrientCap cap : medicalManifest.constraints().nutrientCaps()) {
+            double currentValue = macroByName(totals, cap.nutrient());
+            if (currentValue > cap.maxValue()) {
+                excesses.add(Map.of(
+                        "nutrient", safe(cap.nutrient()),
+                        "current", round(currentValue),
+                        "maximum", round(cap.maxValue()),
+                        "excess", round(currentValue - cap.maxValue()),
+                        "unit", cap.unit() == null ? "" : cap.unit()
+                ));
+            }
+        }
+        return excesses;
+    }
+
+    private NutrientTarget target(PerformanceManifest manifest, String nutrient) {
+        if (manifest == null || manifest.dailyTargets() == null) {
+            return null;
+        }
+
+        return manifest.dailyTargets().stream()
+                .filter(target -> normalizeText(target.nutrient()).contains(nutrient))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private double macroByName(MacroSummary macros, String nutrientName) {
+        String name = normalizeText(nutrientName);
+        if (name.contains("calories") || name.contains("energy")) return macros.calories();
+        if (name.contains("protein")) return macros.protein();
+        if (name.contains("carb")) return macros.carbs();
+        if (name.contains("fat") || name.contains("lipid")) return macros.fat();
+        if (name.contains("sugar")) return macros.sugar();
+        if (name.contains("sodium")) return macros.sodium();
+        return 0.0;
     }
 
     private String planningBasePrompt(
@@ -537,11 +713,15 @@ OUTPUT_SCHEMA:
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 return callGeminiOnce(prompt);
-            } catch (WebClientResponseException.ServiceUnavailable e) {
+            } catch (WebClientResponseException e) {
                 lastError = e;
-                if (attempt >= maxAttempts) break;
+                if (!isRetryableGeminiStatus(e) || attempt >= maxAttempts) break;
 
-                retryAfterDelay("Gemini returned 503 Service Unavailable", attempt, maxAttempts);
+                retryAfterDelay(
+                        "Gemini returned " + e.getStatusCode().value() + " " + e.getStatusText(),
+                        attempt,
+                        maxAttempts
+                );
             } catch (WebClientRequestException e) {
                 lastError = e;
                 if (attempt >= maxAttempts) break;
@@ -554,7 +734,7 @@ OUTPUT_SCHEMA:
     }
 
     private void retryAfterDelay(String reason, int attempt, int maxAttempts) {
-        long delayMillis = 1000L * attempt;
+        long delayMillis = retryDelayMillis(attempt);
         System.err.printf(
                 "%s; retrying attempt %d/%d after %dms.%n",
                 reason,
@@ -563,6 +743,17 @@ OUTPUT_SCHEMA:
                 delayMillis
         );
         sleepBeforeRetry(delayMillis);
+    }
+
+    private boolean isRetryableGeminiStatus(WebClientResponseException exception) {
+        int status = exception.getStatusCode().value();
+        return status == 429 || status >= 500;
+    }
+
+    private long retryDelayMillis(int attempt) {
+        long multiplier = 1L << Math.min(attempt - 1, 4);
+        long delay = retryBaseDelayMillis * multiplier;
+        return Math.min(delay, retryMaxDelayMillis);
     }
 
     private String rootCauseMessage(Throwable throwable) {

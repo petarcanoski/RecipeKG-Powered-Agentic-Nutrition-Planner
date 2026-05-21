@@ -13,11 +13,30 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
+function getStoredUserId() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const storedUserId = localStorage.getItem("userId");
+  if (!storedUserId) {
+    return null;
+  }
+
+  const userId = Number(storedUserId);
+  if (!Number.isFinite(userId) || userId <= 0) {
+    localStorage.removeItem("userId");
+    return null;
+  }
+
+  return userId;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
 
-  const storedUserId = typeof window === "undefined" ? null : localStorage.getItem("userId");
+  const storedUserId = getStoredUserId();
   const [account, setAccount] = useState<AccountProfile | null>(
-    storedUserId ? { id: Number(storedUserId), email: "" } : null
+    storedUserId ? { id: storedUserId, email: "" } : null
   );
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [isProfileLoading, setIsProfileLoading] = useState<boolean>(!!storedUserId);
@@ -46,7 +65,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   useEffect(() => {
-    if (!account?.id || profile) {
+    if (profile) {
+      return;
+    }
+
+    if (!account?.id) {
+      setIsProfileLoading(false);
       return;
     }
 
@@ -113,6 +137,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
             setAccount(registeredProfile);
             setProfile({
+              
               name: profile.name,
               surname: profile.surname,
               email: user.email,
