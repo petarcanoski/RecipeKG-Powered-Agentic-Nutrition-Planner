@@ -7,6 +7,7 @@ import { IntegrationWorkflow } from "./components/IntegrationWorkflow";
 import { NotFound } from "./components/NotFound";
 import { AuthPage } from "./components/AuthPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { ProfilePage } from "./components/ProfilePage";
 
 export const router = createBrowserRouter([
   {
@@ -24,6 +25,7 @@ export const router = createBrowserRouter([
           { path: "data-sources", Component: DataSources },
           { path: "knowledge-graph", Component: KnowledgeGraph },
           { path: "integration", Component: IntegrationWorkflow },
+          { path: "profile", Component: ProfilePage },
           { path: "*", Component: NotFound },
         ],
       },

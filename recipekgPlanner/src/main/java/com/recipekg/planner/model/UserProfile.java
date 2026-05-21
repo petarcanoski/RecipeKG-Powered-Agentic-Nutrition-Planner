@@ -3,6 +3,8 @@ package com.recipekg.planner.model;
 import jakarta.persistence.*;
 import lombok.*;
 
+import java.util.List;
+
 @Entity
 @Getter
 @Setter
@@ -24,11 +26,15 @@ public class UserProfile {
     private String activityLevel;
     private String goal;
 
-    @Column(length = 2000)
-    private String allergies;
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "user_profile_allergies", joinColumns = @JoinColumn(name = "profile_id"))
+    @Column(name = "allergy", length = 255)
+    private List<String> allergies;
 
-    @Column(length = 2000)
-    private String diseases;
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "user_profile_diseases", joinColumns = @JoinColumn(name = "profile_id"))
+    @Column(name = "disease", length = 255)
+    private List<String> diseases;
 
     @OneToOne
     @JoinColumn(name = "user_id")

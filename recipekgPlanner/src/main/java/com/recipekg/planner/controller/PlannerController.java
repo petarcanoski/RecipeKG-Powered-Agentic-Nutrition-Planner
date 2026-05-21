@@ -29,6 +29,7 @@ public class PlannerController {
         return plannerService.generateNutritionPlan(userId);
     }
 
+
     @PostMapping("/next-week/{userId}")
     public WeeklyPlan nextWeek(@PathVariable Long userId) throws JsonProcessingException {
         return plannerService.generateNextWeek(userId);

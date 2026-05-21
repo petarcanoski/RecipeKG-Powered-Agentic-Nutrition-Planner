@@ -10,6 +10,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.util.List;
+import java.util.Objects;
 
 @Service
 @RequiredArgsConstructor
@@ -22,6 +24,8 @@ public class AuthService {
 
         User user = User.builder()
                 .email(request.getEmail())
+                .name(request.getName())
+                .surname(request.getSurname())
                 .password(request.getPassword()) // later we hash
                 .programStarted(false)
                 .currentWeek(0)
@@ -37,12 +41,24 @@ public class AuthService {
                 .bloodType(request.getBloodType())
                 .activityLevel(request.getActivityLevel())
                 .goal(request.getGoal())
-                .allergies(request.getAllergies())
-                .diseases(request.getDiseases())
+                .allergies(cleanList(request.getAllergies()))
+                .diseases(cleanList(request.getDiseases()))
                 .user(user)
                 .build();
 
         profileRepository.save(profile);
+    }
+
+    private List<String> cleanList(List<String> values) {
+        if (values == null) {
+            return List.of();
+        }
+
+        return values.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .toList();
     }
 
     public User login(LoginRequest request) {

@@ -3,6 +3,7 @@ package com.recipekg.planner.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.recipekg.planner.dto.WeekPlanDTO;
+import com.recipekg.planner.model.NutritionPlan;
 import com.recipekg.planner.model.User;
 import com.recipekg.planner.model.UserProfile;
 import com.recipekg.planner.model.WeeklyFeedback;
@@ -20,6 +21,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.util.Objects;
 
 @Service
 @RequiredArgsConstructor
@@ -33,17 +35,34 @@ public class PlannerService {
     private final ProgressAgentService progressAgentService;
     private final PlanParserService planParserService;
     private final NutritionPlanResponseMapper nutritionPlanResponseMapper;
+    private final NutritionPlanPersistenceService nutritionPlanPersistenceService;
 
     public FrontendNutritionPlanResponse generateNutritionPlan(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow();
+
         UserProfile profile = profileRepository.findByUserId(userId)
                 .orElseThrow();
 
         PantryResponse pantryResponse = orchestrator.generateFullPlan(profile);
+        NutritionPlan nutritionPlan = pantryResponse.getNutritionPlan();
 
-        return nutritionPlanResponseMapper.toFrontend(
-                pantryResponse.getNutritionPlan(),
+        FrontendNutritionPlanResponse frontendResponse = nutritionPlanResponseMapper.toFrontend(
+                nutritionPlan,
                 pantryResponse.getRecipes()
         );
+
+        if (isSuccessfulNutritionPlan(nutritionPlan)) {
+            int weekNumber = resolveWeekNumber(user);
+            nutritionPlanPersistenceService.save(
+                    user,
+                    weekNumber,
+                    resolveStartDate(user, weekNumber),
+                    frontendResponse
+            );
+        }
+
+        return frontendResponse;
     }
 
     public WeeklyPlan generateInitialPlan(Long userId) throws JsonProcessingException {
@@ -72,6 +91,28 @@ public class PlannerService {
                 .build();
 
         return planRepository.save(plan);
+    }
+
+    private boolean isSuccessfulNutritionPlan(NutritionPlan nutritionPlan) {
+        if (nutritionPlan == null || nutritionPlan.days() == null || nutritionPlan.days().isEmpty()) {
+            return false;
+        }
+
+        if (nutritionPlan.planningTrace() == null) {
+            return true;
+        }
+
+        return "PASS".equalsIgnoreCase(nutritionPlan.planningTrace().finalStatus());
+    }
+
+    private int resolveWeekNumber(User user) {
+        Integer currentWeek = user.getCurrentWeek();
+        return currentWeek == null || currentWeek < 1 ? 1 : currentWeek;
+    }
+
+    private LocalDate resolveStartDate(User user, int weekNumber) {
+        return Objects.requireNonNullElse(user.getProgramStartDate(), LocalDate.now())
+                .plusWeeks(Math.max(weekNumber - 1, 0));
     }
 
 
