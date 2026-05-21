@@ -11,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.util.List;
 import java.util.Map;
@@ -25,6 +27,15 @@ public class PerformanceAgentService {
 
     @Value("${gemini.api-key}")
     private String apiKey;
+
+    @Value("${gemini.retry-503-attempts:5}")
+    private int retry503Attempts;
+
+    @Value("${gemini.retry-base-delay-ms:10000}")
+    private long retryBaseDelayMillis;
+
+    @Value("${gemini.retry-max-delay-ms:90000}")
+    private long retryMaxDelayMillis;
 
     public PerformanceManifest generatePerformanceManifest(UserProfile profile, MedicalManifest medicalManifest) {
         try {
@@ -110,12 +121,7 @@ MEDICAL MANIFEST:
                         }
                 );
 
-        String raw = webClient.post()
-                .uri("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey)
-                .bodyValue(body)
-                .retrieve()
-                .bodyToMono(String.class)
-                .block();
+        String raw = callGeminiRaw(body);
 
         try {
             JsonNode node = mapper.readTree(raw);
@@ -129,6 +135,83 @@ MEDICAL MANIFEST:
                     .trim();
         } catch (Exception e) {
             throw new RuntimeException("Performance agent response parse failed", e);
+        }
+    }
+
+    private String callGeminiRaw(Map<String, Object> body) {
+        int maxAttempts = Math.max(1, retry503Attempts + 1);
+        RuntimeException lastError = null;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return callGeminiOnce(body);
+            } catch (WebClientResponseException e) {
+                lastError = e;
+                if (!isRetryableGeminiStatus(e) || attempt >= maxAttempts) break;
+
+                retryAfterDelay(
+                        "Performance agent Gemini call returned " + e.getStatusCode().value() + " " + e.getStatusText(),
+                        attempt,
+                        maxAttempts
+                );
+            } catch (WebClientRequestException e) {
+                lastError = e;
+                if (attempt >= maxAttempts) break;
+
+                retryAfterDelay("Performance agent Gemini request failed before receiving a response: " + rootCauseMessage(e), attempt, maxAttempts);
+            }
+        }
+
+        throw lastError == null ? new RuntimeException("Performance agent Gemini request failed") : lastError;
+    }
+
+    private String callGeminiOnce(Map<String, Object> body) {
+        return webClient.post()
+                .uri("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey)
+                .bodyValue(body)
+                .retrieve()
+                .bodyToMono(String.class)
+                .block();
+    }
+
+    private void retryAfterDelay(String reason, int attempt, int maxAttempts) {
+        long delayMillis = retryDelayMillis(attempt);
+        System.err.printf(
+                "%s; retrying attempt %d/%d after %dms.%n",
+                reason,
+                attempt + 1,
+                maxAttempts,
+                delayMillis
+        );
+        sleepBeforeRetry(delayMillis);
+    }
+
+    private boolean isRetryableGeminiStatus(WebClientResponseException exception) {
+        int status = exception.getStatusCode().value();
+        return status == 429 || status >= 500;
+    }
+
+    private long retryDelayMillis(int attempt) {
+        long multiplier = 1L << Math.min(attempt - 1, 4);
+        long delay = retryBaseDelayMillis * multiplier;
+        return Math.min(delay, retryMaxDelayMillis);
+    }
+
+    private String rootCauseMessage(Throwable throwable) {
+        Throwable current = throwable;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        String message = current.getMessage();
+        return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
+    }
+
+    private void sleepBeforeRetry(long delayMillis) {
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting to retry Performance agent Gemini request", e);
         }
     }
 
