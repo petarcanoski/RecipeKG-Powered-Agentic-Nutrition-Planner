@@ -29,8 +29,8 @@ import java.util.List;
 @Table(
         name = "nutrition_plan",
         uniqueConstraints = @UniqueConstraint(
-                name = "uq_nutrition_plan_user_week",
-                columnNames = {"user_id", "week_number"}
+                name = "uq_nutrition_plan_user_week_generated_by",
+                columnNames = {"user_id", "week_number", "generated_by"}
         )
 )
 public class NutritionPlanEntity {
@@ -51,6 +51,9 @@ public class NutritionPlanEntity {
 
     @Column(name = "goal_status")
     private String goalStatus;
+
+    @Column(name = "generated_by", nullable = false, length = 50)
+    private String generatedBy;
 
     @Column(columnDefinition = "TEXT")
     private String summary;

@@ -59,7 +59,8 @@ public class PlannerService {
                     user,
                     weekNumber,
                     resolveStartDate(user, weekNumber),
-                    frontendResponse
+                    frontendResponse,
+                    NutritionPlanPersistenceService.RECIPE_KG_AGENT
             );
         }
 
@@ -67,16 +68,25 @@ public class PlannerService {
     }
 
     public Optional<FrontendNutritionPlanResponse> getCurrentNutritionPlan(Long userId) {
+        return getCurrentNutritionPlan(userId, null);
+    }
+
+    public Optional<FrontendNutritionPlanResponse> getCurrentNutritionPlan(Long userId, String generatedBy) {
         User user = userRepository.findById(userId)
                 .orElseThrow();
 
         int weekNumber = resolveWeekNumber(user);
-        Optional<FrontendNutritionPlanResponse> currentWeekPlan =
-                nutritionPlanPersistenceService.findByUserWeek(userId, weekNumber);
+        Optional<FrontendNutritionPlanResponse> currentWeekPlan = generatedBy == null || generatedBy.isBlank()
+                ? nutritionPlanPersistenceService.findByUserWeek(userId, weekNumber)
+                : nutritionPlanPersistenceService.findByUserWeekAndGeneratedBy(userId, weekNumber, generatedBy);
 
-        return currentWeekPlan.isPresent()
-                ? currentWeekPlan
-                : nutritionPlanPersistenceService.findLatestByUser(userId);
+        if (currentWeekPlan.isPresent()) {
+            return currentWeekPlan;
+        }
+
+        return generatedBy == null || generatedBy.isBlank()
+                ? nutritionPlanPersistenceService.findLatestByUser(userId)
+                : nutritionPlanPersistenceService.findLatestByUserAndGeneratedBy(userId, generatedBy);
     }
 
     public WeeklyPlan generateInitialPlan(Long userId) throws JsonProcessingException {

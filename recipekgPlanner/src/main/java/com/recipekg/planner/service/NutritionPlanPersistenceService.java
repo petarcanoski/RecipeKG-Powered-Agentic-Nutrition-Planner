@@ -25,6 +25,10 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class NutritionPlanPersistenceService {
 
+    public static final String RECIPE_KG_AGENT = "RECIPE_KG_AGENT";
+    public static final String DIRECT_GEMINI = "DIRECT_GEMINI";
+    public static final String TEST_MOCK = "TEST_MOCK";
+
     private final NutritionPlanRepository nutritionPlanRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -35,7 +39,19 @@ public class NutritionPlanPersistenceService {
             LocalDate startDate,
             FrontendNutritionPlanResponse response
     ) {
-        nutritionPlanRepository.findByUserIdAndWeekNumber(user.getId(), weekNumber)
+        return save(user, weekNumber, startDate, response, RECIPE_KG_AGENT);
+    }
+
+    @Transactional
+    public NutritionPlanEntity save(
+            User user,
+            int weekNumber,
+            LocalDate startDate,
+            FrontendNutritionPlanResponse response,
+            String generatedBy
+    ) {
+        String source = normalizeGeneratedBy(generatedBy);
+        nutritionPlanRepository.findByUserIdAndWeekNumberAndGeneratedBy(user.getId(), weekNumber, source)
                 .ifPresent(existingPlan -> {
                     nutritionPlanRepository.delete(existingPlan);
                     nutritionPlanRepository.flush();
@@ -47,6 +63,7 @@ public class NutritionPlanPersistenceService {
         plan.setWeekNumber(weekNumber);
         plan.setStartDate(startDate);
         plan.setGoalStatus(response.goalStatus());
+        plan.setGeneratedBy(source);
         plan.setSummary(response.summary());
         applyWeeklyMacros(plan, response.weeklyTotals());
 
@@ -59,13 +76,25 @@ public class NutritionPlanPersistenceService {
 
     @Transactional(readOnly = true)
     public Optional<FrontendNutritionPlanResponse> findByUserWeek(Long userId, int weekNumber) {
-        return nutritionPlanRepository.findByUserIdAndWeekNumber(userId, weekNumber)
+        return nutritionPlanRepository.findTopByUserIdAndWeekNumberOrderByUpdatedAtDesc(userId, weekNumber)
                 .map(this::toFrontendResponse);
     }
 
     @Transactional(readOnly = true)
     public Optional<FrontendNutritionPlanResponse> findLatestByUser(Long userId) {
-        return nutritionPlanRepository.findTopByUserIdOrderByWeekNumberDesc(userId)
+        return nutritionPlanRepository.findTopByUserIdOrderByWeekNumberDescUpdatedAtDesc(userId)
+                .map(this::toFrontendResponse);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<FrontendNutritionPlanResponse> findByUserWeekAndGeneratedBy(Long userId, int weekNumber, String generatedBy) {
+        return nutritionPlanRepository.findByUserIdAndWeekNumberAndGeneratedBy(userId, weekNumber, normalizeGeneratedBy(generatedBy))
+                .map(this::toFrontendResponse);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<FrontendNutritionPlanResponse> findLatestByUserAndGeneratedBy(Long userId, String generatedBy) {
+        return nutritionPlanRepository.findTopByUserIdAndGeneratedByOrderByWeekNumberDescUpdatedAtDesc(userId, normalizeGeneratedBy(generatedBy))
                 .map(this::toFrontendResponse);
     }
 
@@ -223,5 +252,11 @@ public class NutritionPlanPersistenceService {
 
     private double safeDouble(Double value) {
         return value == null ? 0.0 : value;
+    }
+
+    private String normalizeGeneratedBy(String generatedBy) {
+        return generatedBy == null || generatedBy.isBlank()
+                ? RECIPE_KG_AGENT
+                : generatedBy.trim().toUpperCase();
     }
 }

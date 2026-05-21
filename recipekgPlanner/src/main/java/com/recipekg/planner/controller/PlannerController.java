@@ -5,8 +5,10 @@ import com.recipekg.planner.model.User;
 import com.recipekg.planner.model.WeeklyPlan;
 import com.recipekg.planner.repository.UserRepository;
 import com.recipekg.planner.repository.WeeklyPlanRepository;
+import com.recipekg.planner.response.FrontendNutritionPlanResponse;
 import com.recipekg.planner.response.NutritionPlanGenerationJobResponse;
 import com.recipekg.planner.response.NutritionPlanStatusResponse;
+import com.recipekg.planner.service.DirectGeminiNutritionPlanService;
 import com.recipekg.planner.service.NutritionPlanGenerationJobService;
 import com.recipekg.planner.service.PlanAdaptationService;
 import com.recipekg.planner.service.PlannerService;
@@ -28,10 +30,16 @@ public class PlannerController {
     private final WeeklyPlanRepository planRepository;
     private final UserRepository userRepository;
     private final NutritionPlanGenerationJobService nutritionPlanGenerationJobService;
+    private final DirectGeminiNutritionPlanService directGeminiNutritionPlanService;
 
     @PostMapping("/generate/{userId}")
     public NutritionPlanGenerationJobResponse generate(@PathVariable Long userId) {
         return nutritionPlanGenerationJobService.start(userId);
+    }
+
+    @PostMapping("/generate-direct-gemini/{userId}")
+    public FrontendNutritionPlanResponse generateDirectGemini(@PathVariable Long userId) {
+        return directGeminiNutritionPlanService.generateAndSave(userId);
     }
 
     @GetMapping("/generate/status/{jobId}")
@@ -41,8 +49,11 @@ public class PlannerController {
     }
 
     @GetMapping("/nutrition-plan/current/{userId}")
-    public NutritionPlanStatusResponse currentNutritionPlan(@PathVariable Long userId) {
-        return plannerService.getCurrentNutritionPlan(userId)
+    public NutritionPlanStatusResponse currentNutritionPlan(
+            @PathVariable Long userId,
+            @RequestParam(required = false) String generatedBy
+    ) {
+        return plannerService.getCurrentNutritionPlan(userId, generatedBy)
                 .map(plan -> new NutritionPlanStatusResponse(
                         "COMPLETED",
                         "Nutrition plan is available.",

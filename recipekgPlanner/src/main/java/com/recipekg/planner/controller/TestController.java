@@ -6,11 +6,13 @@ import com.recipekg.planner.model.MacroSummary;
 import com.recipekg.planner.model.NutritionPlan;
 import com.recipekg.planner.model.PlannedMeal;
 import com.recipekg.planner.model.RecipeCandidate;
+import com.recipekg.planner.model.User;
 import com.recipekg.planner.model.UserProfile;
 import com.recipekg.planner.repository.UserProfileRepository;
 import com.recipekg.planner.response.FrontendNutritionPlanResponse;
 import com.recipekg.planner.response.PantryResponse;
 import com.recipekg.planner.service.FoodScientistService;
+import com.recipekg.planner.service.NutritionPlanPersistenceService;
 import com.recipekg.planner.service.NutritionPlanResponseMapper;
 import com.recipekg.planner.service.agents.AgentOrchestratorService;
 import com.recipekg.planner.service.agents.MedicalAgentService;
@@ -23,9 +25,11 @@ import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @RestController
 public class TestController {
@@ -36,15 +40,17 @@ public class TestController {
     private final AgentOrchestratorService agentOrchestratorService;
     private final ProgressAgentService progressAgentService;
     private final NutritionPlanResponseMapper nutritionPlanResponseMapper;
+    private final NutritionPlanPersistenceService nutritionPlanPersistenceService;
 
 
-    public TestController(MedicalAgentService medicalAgentService, UserProfileRepository userProfileRepository, FoodScientistService foodScientistService, AgentOrchestratorService agentOrchestratorService, ProgressAgentService progressAgentService, NutritionPlanResponseMapper nutritionPlanResponseMapper) {
+    public TestController(MedicalAgentService medicalAgentService, UserProfileRepository userProfileRepository, FoodScientistService foodScientistService, AgentOrchestratorService agentOrchestratorService, ProgressAgentService progressAgentService, NutritionPlanResponseMapper nutritionPlanResponseMapper, NutritionPlanPersistenceService nutritionPlanPersistenceService) {
         this.medicalAgentService = medicalAgentService;
         this.userProfileRepository = userProfileRepository;
         this.foodScientistService = foodScientistService;
         this.agentOrchestratorService = agentOrchestratorService;
         this.progressAgentService = progressAgentService;
         this.nutritionPlanResponseMapper = nutritionPlanResponseMapper;
+        this.nutritionPlanPersistenceService = nutritionPlanPersistenceService;
     }
 
     @Value("${gemini.api-key}")
@@ -99,9 +105,25 @@ public class TestController {
         return hardcodedNutritionPlan();
     }
 
-    @GetMapping("/test-nutrition-plan")
-    public FrontendNutritionPlanResponse testNutritionPlan(){
-        return hardcodedNutritionPlan();
+    @GetMapping({"/test-nutrition-plan", "/test-nutrition-plan/{userId}"})
+    public FrontendNutritionPlanResponse testNutritionPlan(@PathVariable(required = false) Long userId){
+        FrontendNutritionPlanResponse plan = hardcodedNutritionPlan();
+
+        if (userId != null) {
+            UserProfile profile = userProfileRepository.findByUserId(userId)
+                    .orElseThrow();
+            User user = profile.getUser();
+            int weekNumber = resolveWeekNumber(user);
+            nutritionPlanPersistenceService.save(
+                    user,
+                    weekNumber,
+                    resolveStartDate(user, weekNumber),
+                    plan,
+                    NutritionPlanPersistenceService.TEST_MOCK
+            );
+        }
+
+        return plan;
     }
 
     @GetMapping("/test-full-plan/{id}")
@@ -282,6 +304,16 @@ public class TestController {
 
     private IngredientUse ingredient(String quantity, String unit, String name) {
         return new IngredientUse(name, quantity, unit, null);
+    }
+
+    private int resolveWeekNumber(User user) {
+        Integer currentWeek = user.getCurrentWeek();
+        return currentWeek == null || currentWeek < 1 ? 1 : currentWeek;
+    }
+
+    private LocalDate resolveStartDate(User user, int weekNumber) {
+        return Objects.requireNonNullElse(user.getProgramStartDate(), LocalDate.now())
+                .plusWeeks(Math.max(weekNumber - 1, 0));
     }
 
 }

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { Link } from "react-router";
 import { useAuth } from "../auth/AuthContext";
+import { UserProfile } from "../auth/types";
 import { Button } from "./ui/button";
 import {
   Card,
@@ -124,16 +125,90 @@ const recipeKgLoadingMessages = [
 const recipeKgLoadingMessageIntervalMs = 6000;
 const recipeKgPollingIntervalMs = 4000;
 
-function buildGeminiPrompt(parameters: ProfileParameter[]) {
-  const profileLines = parameters
-    .map((parameter) => `${parameter.label}: ${parameter.value}`)
-    .join("\n");
+function safeProfileValue(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? `[${value.join(", ")}]` : "[]";
+  }
 
-  return `Generate a complete 7-day nutrition plan using these user parameters:
+  if (value === null || value === undefined || value === "") {
+    return "N/A";
+  }
 
-${profileLines}
+  return String(value);
+}
 
-Return days, meals, ingredients, servings, per-meal macros, daily macro totals, weekly macro totals, and a brief rationale for each day.`;
+function buildGeminiPrompt(profile: UserProfile | null) {
+  return `You are a nutrition planning assistant.
+
+Create a practical 7-day nutrition plan directly from the user's profile.
+Use normal meal names and ingredient lists that a user could understand.
+
+Return strict JSON only. The JSON must match this exact shape:
+{
+  "goalStatus": "string",
+  "summary": "string",
+  "days": [
+    {
+      "day": 1,
+      "meals": [
+        {
+          "slot": "breakfast|lunch|dinner|snack|dessert",
+          "recipeName": "string",
+          "ingredients": ["string"],
+          "servings": 1.0,
+          "totalMacros": {
+            "calories": 0,
+            "protein": 0,
+            "carbs": 0,
+            "fat": 0,
+            "sugar": 0,
+            "sodium": 0
+          },
+          "reason": "string"
+        }
+      ],
+      "totalMacros": {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0,
+        "sugar": 0,
+        "sodium": 0
+      },
+      "rationale": "string"
+    }
+  ],
+  "weeklyTotals": {
+    "calories": 0,
+    "protein": 0,
+    "carbs": 0,
+    "fat": 0,
+    "sugar": 0,
+    "sodium": 0
+  }
+}
+
+Rules:
+1. Return exactly 7 days.
+2. Each day should have breakfast, lunch, and dinner. Add snacks only when useful.
+3. Respect allergies and diseases/conditions strictly.
+4. If the user has diabetes or sugar restriction, keep sugar conservative.
+5. If the user has hypertension or sodium restriction, keep sodium conservative.
+6. Macros must be realistic estimates for the listed servings.
+7. Compute day totalMacros as the sum of meal totalMacros.
+8. Compute weeklyTotals as the sum of day totalMacros.
+9. Do not include markdown fences or explanation outside JSON.
+
+USER_PROFILE:
+Age: ${safeProfileValue(profile?.age)}
+Gender: ${safeProfileValue(profile?.gender)}
+HeightCm: ${safeProfileValue(profile?.height)}
+WeightKg: ${safeProfileValue(profile?.weight)}
+BloodType: ${safeProfileValue(profile?.bloodType)}
+ActivityLevel: ${safeProfileValue(profile?.activityLevel)}
+Goal: ${safeProfileValue(profile?.goal)}
+Allergies: ${safeProfileValue(profile?.allergies)}
+DiseasesOrConditions: ${safeProfileValue(profile?.diseases)}`;
 }
 
 function PromptPanel({
@@ -224,7 +299,13 @@ function MacroGrid({ macros }: { macros: MacroSummary }) {
   );
 }
 
-function GeneratedPlan({ plan }: { plan: NutritionPlanResponse }) {
+function GeneratedPlan({
+  plan,
+  title,
+}: {
+  plan: NutritionPlanResponse;
+  title: string;
+}) {
   const [openDay, setOpenDay] = useState<number>(plan.days[0]?.day ?? 1);
 
   return (
@@ -235,7 +316,7 @@ function GeneratedPlan({ plan }: { plan: NutritionPlanResponse }) {
             <div className="flex items-center gap-2">
               <CalendarDays className="h-5 w-5 text-blue-600" />
               <h3 className="text-lg font-semibold text-gray-900">
-                Generated RecipeKG plan
+                {title}
               </h3>
             </div>
             <p className="mt-1 text-sm text-gray-600">{plan.summary}</p>
@@ -344,7 +425,13 @@ function GeneratedPlan({ plan }: { plan: NutritionPlanResponse }) {
   );
 }
 
-function RecipeKgLoading({ message }: { message: string }) {
+function PlanLoading({
+  title,
+  message,
+}: {
+  title: string;
+  message: string;
+}) {
   return (
     <div className="flex flex-col items-center gap-4 rounded-md border bg-blue-50 p-6 text-center">
       <div className="relative flex h-16 w-16 items-center justify-center rounded-full border bg-white">
@@ -353,7 +440,7 @@ function RecipeKgLoading({ message }: { message: string }) {
       </div>
       <div className="space-y-1 transition-all duration-300">
         <p className="text-lg font-semibold text-gray-900">
-          Generating RecipeKG plan
+          {title}
         </p>
         <p className="text-sm text-gray-600">{message}</p>
         <p className="text-sm font-medium text-gray-700">
@@ -380,6 +467,8 @@ function GeminiPlaceholderResult({ message }: { message: string }) {
 export function Dashboard() {
   const { profile, account, isProfileLoading } = useAuth();
   const [generatedPlan, setGeneratedPlan] =
+    useState<NutritionPlanResponse | null>(null);
+  const [generatedGeminiPlan, setGeneratedGeminiPlan] =
     useState<NutritionPlanResponse | null>(null);
   const [activeRecipeKgJobId, setActiveRecipeKgJobId] = useState<string | null>(
     null,
@@ -419,13 +508,14 @@ export function Dashboard() {
   }, [profile, isProfileLoading]);
 
   const geminiPrompt = useMemo(
-    () => buildGeminiPrompt(profileParameters),
-    [profileParameters],
+    () => buildGeminiPrompt(profile),
+    [profile],
   );
   const shouldMatchPanelHeights =
     recipeKgState.status === "idle" &&
     geminiState.status === "idle" &&
-    !generatedPlan;
+    !generatedPlan &&
+    !generatedGeminiPlan;
 
   function stopPolling() {
     if (pollingTimeoutRef.current !== null) {
@@ -645,21 +735,50 @@ export function Dashboard() {
     };
   }, [account?.id]);
 
-  function sendGeminiPlaceholder() {
-    const doneMessage =
-      "Placeholder request prepared for the Gemini comparison controller.";
+  async function generateDirectGeminiPlan() {
+    if (geminiState.status === "loading") {
+      return;
+    }
 
-    setGeminiState({
-      status: "loading",
-      message: "Preparing request payload from the user parameters.",
-    });
-
-    window.setTimeout(() => {
+    if (!account?.id) {
       setGeminiState({
         status: "sent",
-        message: doneMessage,
+        message: "Unable to start Gemini generation because the current user id is missing.",
       });
-    }, 500);
+      return;
+    }
+
+    setGeneratedGeminiPlan(null);
+    setGeminiState({
+      status: "loading",
+      message: "Generating direct Gemini nutrition plan. This can take a few minutes.",
+    });
+
+    try {
+      const response = await fetch(
+        `http://localhost:8080/api/planner/generate-direct-gemini/${account.id}`,
+        {
+          method: "POST",
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("Request failed");
+      }
+
+      const plan = (await response.json()) as NutritionPlanResponse;
+      setGeneratedGeminiPlan(plan);
+      setGeminiState({
+        status: "sent",
+        message: "Gemini plan generated successfully.",
+      });
+    } catch {
+      setGeminiState({
+        status: "sent",
+        message:
+          "Unable to generate the direct Gemini plan. Make sure the backend is running on port 8080.",
+      });
+    }
   }
 
   return (
@@ -742,9 +861,12 @@ export function Dashboard() {
           }
           result={
             recipeKgState.status === "loading" ? (
-              <RecipeKgLoading message={recipeKgState.message} />
+              <PlanLoading
+                title="Generating RecipeKG plan"
+                message={recipeKgState.message}
+              />
             ) : generatedPlan ? (
-              <GeneratedPlan plan={generatedPlan} />
+              <GeneratedPlan plan={generatedPlan} title="Generated RecipeKG plan" />
             ) : null
           }
         />
@@ -755,18 +877,29 @@ export function Dashboard() {
           buttonLabel="Generate with Google Gemini"
           buttonIcon={Sparkles}
           state={geminiState}
-          onSend={sendGeminiPlaceholder}
+          onSend={generateDirectGeminiPlan}
           body={
             <div className="space-y-3">
               <p>Pregenerated prompt based on your parameters:</p>
               <Textarea
                 value={geminiPrompt}
                 readOnly
-                className="min-h-[150px] resize-none bg-white text-sm leading-6"
+                className="max-h-[460px] min-h-[260px] resize-none overflow-y-auto bg-white font-mono text-sm leading-6"
               />
             </div>
           }
-          result={<GeminiPlaceholderResult message={geminiState.message} />}
+          result={
+            geminiState.status === "loading" ? (
+              <PlanLoading
+                title="Generating Gemini plan"
+                message={geminiState.message}
+              />
+            ) : generatedGeminiPlan ? (
+              <GeneratedPlan plan={generatedGeminiPlan} title="Generated Gemini plan" />
+            ) : (
+              <GeminiPlaceholderResult message={geminiState.message} />
+            )
+          }
         />
       </div>
     </div>
