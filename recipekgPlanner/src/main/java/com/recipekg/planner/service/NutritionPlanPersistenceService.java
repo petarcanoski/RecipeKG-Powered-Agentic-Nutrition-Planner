@@ -4,9 +4,12 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.recipekg.planner.model.MacroSummary;
+import com.recipekg.planner.model.NutritionPlan;
 import com.recipekg.planner.model.NutritionPlanDayEntity;
 import com.recipekg.planner.model.NutritionPlanEntity;
+import com.recipekg.planner.model.NutritionPlanLlmTraceEntity;
 import com.recipekg.planner.model.NutritionPlanMealEntity;
+import com.recipekg.planner.model.PlanningIterationTrace;
 import com.recipekg.planner.model.User;
 import com.recipekg.planner.repository.NutritionPlanRepository;
 import com.recipekg.planner.response.FrontendDailyNutritionPlanResponse;
@@ -28,6 +31,7 @@ public class NutritionPlanPersistenceService {
     public static final String RECIPE_KG_AGENT = "RECIPE_KG_AGENT";
     public static final String DIRECT_GEMINI = "DIRECT_GEMINI";
     public static final String TEST_MOCK = "TEST_MOCK";
+    private static final String NUTRITIONIST_MODEL = "gemini-3-flash-preview";
 
     private final NutritionPlanRepository nutritionPlanRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -50,6 +54,18 @@ public class NutritionPlanPersistenceService {
             FrontendNutritionPlanResponse response,
             String generatedBy
     ) {
+        return save(user, weekNumber, startDate, response, generatedBy, null);
+    }
+
+    @Transactional
+    public NutritionPlanEntity save(
+            User user,
+            int weekNumber,
+            LocalDate startDate,
+            FrontendNutritionPlanResponse response,
+            String generatedBy,
+            NutritionPlan sourcePlan
+    ) {
         String source = normalizeGeneratedBy(generatedBy);
         nutritionPlanRepository.findByUserIdAndWeekNumberAndGeneratedBy(user.getId(), weekNumber, source)
                 .ifPresent(existingPlan -> {
@@ -70,6 +86,8 @@ public class NutritionPlanPersistenceService {
         if (response.days() != null) {
             response.days().forEach(dayResponse -> plan.getDays().add(toDayEntity(plan, dayResponse)));
         }
+
+        attachLlmTraces(plan, sourcePlan);
 
         return nutritionPlanRepository.save(plan);
     }
@@ -205,6 +223,39 @@ public class NutritionPlanPersistenceService {
         return meal;
     }
 
+    private void attachLlmTraces(NutritionPlanEntity plan, NutritionPlan sourcePlan) {
+        if (sourcePlan == null
+                || sourcePlan.planningTrace() == null
+                || sourcePlan.planningTrace().iterations() == null) {
+            return;
+        }
+
+        for (PlanningIterationTrace trace : sourcePlan.planningTrace().iterations()) {
+            plan.getLlmTraces().add(toLlmTraceEntity(plan, sourcePlan.planningTrace().sessionId(), trace));
+        }
+    }
+
+    private NutritionPlanLlmTraceEntity toLlmTraceEntity(
+            NutritionPlanEntity plan,
+            String sessionId,
+            PlanningIterationTrace trace
+    ) {
+        NutritionPlanLlmTraceEntity entity = new NutritionPlanLlmTraceEntity();
+        entity.setNutritionPlan(plan);
+        entity.setSessionId(sessionId);
+        entity.setIterationNumber(trace.iterationNumber());
+        entity.setPhase(trace.phase());
+        entity.setModel(trace.model() == null || trace.model().isBlank() ? NUTRITIONIST_MODEL : trace.model());
+        entity.setStatus(trace.status());
+        entity.setRecipeIdsSentJson(writeJson(trace.recipeIdsSent()));
+        entity.setSelectedRecipeIdsJson(writeJson(trace.selectedRecipeIds()));
+        entity.setValidationResultJson(writeJson(trace.validationResult()));
+        entity.setPromptText(trace.promptText());
+        entity.setResponseText(trace.responseText());
+        entity.setErrorMessage(trace.errorMessage());
+        return entity;
+    }
+
     private void applyWeeklyMacros(NutritionPlanEntity plan, MacroSummary macros) {
         MacroSummary safeMacros = macros == null ? MacroSummary.zero() : macros;
         plan.setWeeklyCalories(safeMacros.calories());
@@ -236,10 +287,14 @@ public class NutritionPlanPersistenceService {
     }
 
     private String writeIngredients(List<String> ingredients) {
+        return writeJson(ingredients == null ? List.of() : ingredients);
+    }
+
+    private String writeJson(Object value) {
         try {
-            return objectMapper.writeValueAsString(ingredients == null ? List.of() : ingredients);
+            return objectMapper.writeValueAsString(value);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Failed to serialize nutrition plan ingredients", e);
+            throw new IllegalStateException("Failed to serialize nutrition plan data", e);
         }
     }
 

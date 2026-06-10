@@ -85,6 +85,9 @@ public class NutritionPlanEntity {
     @OneToMany(mappedBy = "nutritionPlan", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<NutritionPlanDayEntity> days = new ArrayList<>();
 
+    @OneToMany(mappedBy = "nutritionPlan", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<NutritionPlanLlmTraceEntity> llmTraces = new ArrayList<>();
+
     @PrePersist
     void prePersist() {
         LocalDateTime now = LocalDateTime.now();

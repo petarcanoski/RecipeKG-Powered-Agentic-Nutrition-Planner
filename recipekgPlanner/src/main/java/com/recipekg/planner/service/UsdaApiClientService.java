@@ -34,6 +34,15 @@ public class UsdaApiClientService {
     @Value("${servings.estimated-max:12.0}")
     private double maxEstimatedServings;
 
+    @Value("${usda.retry-attempts:3}")
+    private int usdaRetryAttempts;
+
+    @Value("${usda.retry-base-delay-ms:5000}")
+    private long usdaRetryBaseDelayMillis;
+
+    @Value("${usda.retry-max-delay-ms:30000}")
+    private long usdaRetryMaxDelayMillis;
+
     public void populateMacros(List<RecipeCandidate> recipes) {
         Set<Integer> uniqueIds = new HashSet<>();
 
@@ -163,26 +172,91 @@ public class UsdaApiClientService {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
 
+        String response = postForObjectWithRetry(url, new HttpEntity<>(requestBody, headers));
+        if (response == null || response.isBlank()) {
+            return result;
+        }
+
         try {
-            String response = restTemplate.postForObject(url, new HttpEntity<>(requestBody, headers), String.class);
             JsonNode root = mapper.readTree(response);
-
-            for (JsonNode food : root) {
-                String fdcId = food.path("fdcId").asText();
-                JsonNode nutrients = food.path("foodNutrients");
-                JsonNode portions = food.path("foodPortions"); // ADDED THIS
-
-                String ingredientsText = food.path("ingredients").asText("");
-                if (ingredientsText.isEmpty()) ingredientsText = food.path("description").asText("");
-
-                UsdaFoodData foodData = new UsdaFoodData(extractMacros(nutrients), ingredientsText, portions);
-                foodDataCache.put(fdcId, foodData);
-                result.put(fdcId, foodData);
-            }
+            populateFoodDataFromResponse(root, result);
         } catch (Exception e) {
-            System.err.println("USDA API Call Failed: " + e.getMessage());
+            System.err.println("USDA API response parse failed: " + e.getMessage());
         }
         return result;
+    }
+
+    private String postForObjectWithRetry(String url, HttpEntity<Map<String, Object>> request) {
+        int maxAttempts = Math.max(1, usdaRetryAttempts);
+        Exception lastError = null;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return restTemplate.postForObject(url, request, String.class);
+            } catch (Exception e) {
+                lastError = e;
+                if (attempt >= maxAttempts) break;
+
+                long delayMillis = usdaRetryDelayMillis(attempt);
+                System.err.printf(
+                        "USDA API call failed: %s; retrying attempt %d/%d after %dms.%n",
+                        rootCauseMessage(e),
+                        attempt + 1,
+                        maxAttempts,
+                        delayMillis
+                );
+                sleepBeforeRetry(delayMillis);
+            }
+        }
+
+        System.err.println("USDA API Call Failed after retries: " + rootCauseMessage(lastError));
+        return null;
+    }
+
+    private void populateFoodDataFromResponse(JsonNode root, Map<String, UsdaFoodData> result) {
+        if (root == null || !root.isArray()) {
+            return;
+        }
+
+        for (JsonNode food : root) {
+            String fdcId = food.path("fdcId").asText();
+            JsonNode nutrients = food.path("foodNutrients");
+            JsonNode portions = food.path("foodPortions");
+
+            String ingredientsText = food.path("ingredients").asText("");
+            if (ingredientsText.isEmpty()) ingredientsText = food.path("description").asText("");
+
+            UsdaFoodData foodData = new UsdaFoodData(extractMacros(nutrients), ingredientsText, portions);
+            foodDataCache.put(fdcId, foodData);
+            result.put(fdcId, foodData);
+        }
+    }
+
+    private long usdaRetryDelayMillis(int attempt) {
+        long multiplier = 1L << Math.min(attempt - 1, 4);
+        long delay = usdaRetryBaseDelayMillis * multiplier;
+        return Math.min(delay, usdaRetryMaxDelayMillis);
+    }
+
+    private String rootCauseMessage(Throwable throwable) {
+        if (throwable == null) return "unknown error";
+
+        Throwable current = throwable;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+
+        String message = current.getMessage();
+        return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
+    }
+
+    private void sleepBeforeRetry(long delayMillis) {
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting to retry USDA request", e);
+        }
     }
 
     private MacroProfile extractMacros(JsonNode nutrients) {

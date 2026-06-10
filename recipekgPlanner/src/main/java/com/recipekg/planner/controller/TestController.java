@@ -3,6 +3,7 @@ package com.recipekg.planner.controller;
 import com.recipekg.planner.model.DailyMealPlan;
 import com.recipekg.planner.model.IngredientUse;
 import com.recipekg.planner.model.MacroSummary;
+import com.recipekg.planner.model.MedicalManifest;
 import com.recipekg.planner.model.NutritionPlan;
 import com.recipekg.planner.model.PlannedMeal;
 import com.recipekg.planner.model.RecipeCandidate;
@@ -21,6 +22,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
@@ -133,6 +135,21 @@ public class TestController {
 //        MedicalManifest m= medicalAgentService.generateMedicalAdvice(userProfile);
 //        return foodScientistService.buildSafeCandidateQuery(m);
         return agentOrchestratorService.generateFullPlan(userProfile);
+    }
+
+    @GetMapping("/test-breakfast-recipes/{id}")
+    public PantryResponse testBreakfastRecipes(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "false") boolean useMedical
+    ) {
+        UserProfile userProfile = userProfileRepository.findByUserId(id)
+                .orElseThrow();
+
+        MedicalManifest manifest = useMedical
+                ? medicalAgentService.generateMedicalAdvice(userProfile)
+                : null;
+
+        return foodScientistService.fetchBreakfastCandidates(userProfile, manifest);
     }
 
     private FrontendNutritionPlanResponse hardcodedNutritionPlan() {

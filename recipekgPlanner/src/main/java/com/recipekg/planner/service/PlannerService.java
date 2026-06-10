@@ -59,7 +59,8 @@ public class PlannerService {
                 weekNumber,
                 resolveStartDate(user, weekNumber),
                 frontendResponse,
-                NutritionPlanPersistenceService.RECIPE_KG_AGENT
+                NutritionPlanPersistenceService.RECIPE_KG_AGENT,
+                nutritionPlan
         );
 
         return frontendResponse;

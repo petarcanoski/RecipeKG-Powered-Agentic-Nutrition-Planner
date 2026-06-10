@@ -10,6 +10,7 @@ import com.recipekg.planner.response.PantryResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +32,12 @@ public class FoodScientistService {
     @Value("${recipe.candidates.enrichment-limit:100}")
     private int enrichmentLimit;
 
+    @Value("${recipe.candidates.breakfast-search-limit:200}")
+    private int breakfastSearchLimit;
+
+    @Value("${recipe.candidates.breakfast-min-enrichment:20}")
+    private int breakfastMinEnrichment;
+
     public FoodScientistService(GraphDbRepository graphDbRepository,
                                 UsdaApiClientService usdaApiClientService,
                                 PerformanceScoringService performanceScoringService) {
@@ -38,6 +45,28 @@ public class FoodScientistService {
         this.usdaApiClientService = usdaApiClientService;
         this.performanceScoringService = performanceScoringService;
     }
+
+    private static final List<String> BREAKFAST_SEARCH_TERMS = List.of(
+            "breakfast", "brunch", "morning",
+            "oat", "oats", "oatmeal", "overnight oats", "porridge",
+            "cereal", "muesli", "granola", "bran", "wheat germ",
+            "yogurt", "yoghurt", "greek yogurt", "kefir", "milk",
+            "smoothie", "smoothie bowl", "protein shake",
+            "egg", "eggs", "egg white", "egg whites", "scrambled egg", "scramble",
+            "omelet", "omelette", "frittata", "quiche",
+            "pancake", "pancakes", "waffle", "waffles", "crepe", "crepes",
+            "french toast", "toast", "bagel", "bagels", "english muffin",
+            "muffin", "muffins", "scone", "scones", "biscuit", "biscuits",
+            "breakfast burrito", "breakfast sandwich", "breakfast casserole",
+            "hash", "hash brown", "hash browns",
+            "fruit", "banana", "bananas", "apple", "apples", "pear", "pears",
+            "peach", "peaches", "mango", "mangos", "mangoes", "pineapple",
+            "berry", "berries", "blueberry", "blueberries", "strawberry", "strawberries",
+            "raspberry", "raspberries", "blackberry", "blackberries",
+            "chia", "chia seed", "chia seeds", "flax", "flaxseed", "flax seed",
+            "almond butter", "peanut butter",
+            "cottage cheese", "ricotta"
+    );
 
     private static final String SPARQL_PREFIXES = """
             PREFIX heals: <http://idea.rpi.edu/heals/kb/>
@@ -55,29 +84,43 @@ public class FoodScientistService {
     public PantryResponse fetchSafePantry(UserProfile profile, MedicalManifest manifest, PerformanceManifest performanceManifest) {
         String sparqlQuery = buildSafeCandidateQuery(manifest);
 
-        // --- TIER 0 & 1: Fetch a broad, medically filtered candidate pool from GraphDB ---
-        List<RecipeCandidate> results = graphDbRepository.executeSparql(sparqlQuery);
+        // Fetch a broad, medically filtered candidate pool from graphdb
+        List<RecipeCandidate> generalResults = graphDbRepository.executeSparql(sparqlQuery);
 
-        // --- TIER 1b: Cheap local ranking before expensive USDA macro enrichment ---
-        results = preRankCandidates(results, performanceManifest).stream()
-                .limit(Math.max(1, enrichmentLimit))
-                .collect(Collectors.toList());
+        // Fetch a separate breakfast-biased pool so breakfast-like recipes do not get crowded out early
+        List<RecipeCandidate> breakfastResults = graphDbRepository.executeSparql(buildBreakfastCandidateQuery(manifest));
 
-        // --- TIER 2a: Volumetric Macro Calculation ---
-        // Populates per-serving macros using USDA per-100g data and deterministic serving estimates.
+        // Cheap local ranking before expensive usda macro calculation
+        List<RecipeCandidate> results = mergeCandidatePools(
+                preRankCandidates(breakfastResults, performanceManifest),
+                preRankCandidates(generalResults, performanceManifest),
+                breakfastMinEnrichment,
+                enrichmentLimit
+        );
+
+
+        // Populate per-serving macros using USDA per-100g data and deterministic serving estimates
         usdaApiClientService.populateMacros(results);
 
-        // --- TIER 2b: Generic Nutrient Cap Filtering ---
-        // Dynamically enforces every nutrient limit in the manifest against per-serving macros.
+
+        // Dynamically enforce every nutrient limit in the manifest against per-serving macros
         if (manifest != null && "CONSTRAINED".equalsIgnoreCase(manifest.status())) {
             results = enforceMedicalCaps(results, manifest);
         }
 
-        // --- TIER 3: Performance scoring. Medical safety remains the hard gate. ---
+        // Performance scoring. Medical safety remains the hard gate
         results = performanceScoringService.scoreAndRank(results, performanceManifest);
         results = keepDiverseLabels(results);
 
         return new PantryResponse(sparqlQuery, results, manifest, performanceManifest);
+    }
+
+    public PantryResponse fetchBreakfastCandidates(UserProfile profile, MedicalManifest manifest) {
+        String sparqlQuery = buildBreakfastCandidateQuery(manifest);
+        List<RecipeCandidate> results = graphDbRepository.executeSparql(sparqlQuery);
+        results = preRankCandidates(results, null);
+
+        return new PantryResponse(sparqlQuery, results, manifest, null);
     }
 
    public String buildSafeCandidateQuery(MedicalManifest manifest) {
@@ -122,6 +165,100 @@ public class FoodScientistService {
     query.append("GROUP BY ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit\n");
 
     return query.toString();
+}
+
+public String buildBreakfastCandidateQuery(MedicalManifest manifest) {
+    StringBuilder query = new StringBuilder();
+    query.append(SPARQL_PREFIXES).append("\n");
+
+    query.append("SELECT DISTINCT ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit (SAMPLE(?usdaUrl) AS ?usdaUrl) \n");
+    query.append("WHERE {\n");
+
+    query.append("  {\n");
+    query.append("    SELECT ?recipe ?recipeLabel (COUNT(DISTINCT ?usdaItem) AS ?mappedCount) WHERE {\n");
+    query.append("      ?recipe a heals:recipe ; rdfs:label ?recipeLabel .\n");
+
+    if (manifest != null && manifest.constraints() != null) {
+        injectKeywordExclusions(query, manifest.constraints().hardExclusions());
+        injectSemanticExclusions(query, manifest.constraints().hardExclusions());
+    }
+
+    injectBreakfastSearchFilter(query);
+
+    query.append("      OPTIONAL {\n");
+    query.append("        ?recipe heals:uses/heals:ing_name ?candidateIng .\n");
+    query.append("        ?candidateIng owl:equivalentClass ?usdaItem .\n");
+    query.append("        FILTER(CONTAINS(STR(?usdaItem), \"fdc.nal.usda.gov\"))\n");
+    query.append("      }\n");
+    query.append("    }\n");
+    query.append("    GROUP BY ?recipe ?recipeLabel\n");
+    query.append("    ORDER BY DESC(?mappedCount) (LCASE(STR(?recipeLabel)))\n");
+    query.append("    LIMIT ").append(Math.max(1, breakfastSearchLimit)).append("\n");
+    query.append("  }\n\n");
+
+    query.append("  ?recipe heals:uses ?use .\n");
+    query.append("  ?use heals:ing_name ?ingName .\n");
+    query.append("  OPTIONAL { ?ingName rdfs:label ?ingLabel }\n");
+    query.append("  OPTIONAL { ?use heals:ing_quantity ?qty }\n");
+    query.append("  OPTIONAL { ?use heals:ing_unit ?unit }\n");
+    query.append("  OPTIONAL {\n");
+    query.append("    ?ingName owl:equivalentClass ?usdaItem .\n");
+    query.append("    FILTER(CONTAINS(STR(?usdaItem), \"fdc.nal.usda.gov\")) \n");
+    query.append("    BIND(STR(?usdaItem) AS ?usdaUrl) \n");
+    query.append("  }\n");
+
+    query.append("}\n");
+    query.append("GROUP BY ?recipe ?recipeLabel ?use ?ingName ?ingLabel ?qty ?unit\n");
+
+    return query.toString();
+}
+
+private void injectBreakfastSearchFilter(StringBuilder query) {
+    String regex = "(^|\\\\W)(" + BREAKFAST_SEARCH_TERMS.stream()
+            .map(this::escapeRegexTerm)
+            .collect(Collectors.joining("|"))
+            + ")(\\\\W|$)";
+
+    query.append("      # --- BREAKFAST CANDIDATE BOOST SEARCH ---\n");
+    query.append("      FILTER EXISTS {\n");
+    query.append("        ?recipe heals:uses/heals:ing_name ?breakfastIng .\n");
+    query.append("        OPTIONAL { ?breakfastIng rdfs:label ?breakfastIngLabel }\n");
+    query.append("        BIND(LCASE(CONCAT(STR(?recipeLabel), \" \", STR(?breakfastIng), \" \", COALESCE(STR(?breakfastIngLabel), \"\"))) AS ?breakfastSearchText)\n");
+    query.append("        FILTER(REGEX(?breakfastSearchText, \"").append(regex).append("\"))\n");
+    query.append("      }\n\n");
+}
+
+private String escapeRegexTerm(String term) {
+    return term.toLowerCase(Locale.ROOT)
+            .replaceAll("([.^$*+?()\\[\\]{}|\\\\])", "\\\\$1")
+            .replace(" ", "\\\\s+");
+}
+
+private List<RecipeCandidate> mergeCandidatePools(
+        List<RecipeCandidate> breakfastCandidates,
+        List<RecipeCandidate> generalCandidates,
+        int requestedBreakfastMinimum,
+        int requestedTotal
+) {
+    int total = Math.max(1, requestedTotal);
+    int breakfastMinimum = Math.min(Math.max(0, requestedBreakfastMinimum), total);
+
+    Map<String, RecipeCandidate> merged = new LinkedHashMap<>();
+    addUpTo(merged, breakfastCandidates, breakfastMinimum);
+    addUpTo(merged, generalCandidates, total);
+    addUpTo(merged, breakfastCandidates, total);
+
+    return new ArrayList<>(merged.values());
+}
+
+private void addUpTo(Map<String, RecipeCandidate> target, List<RecipeCandidate> source, int maxSize) {
+    if (source == null || source.isEmpty()) return;
+
+    for (RecipeCandidate candidate : source) {
+        if (target.size() >= maxSize) return;
+        if (candidate == null || candidate.getUri() == null || candidate.getUri().isBlank()) continue;
+        target.putIfAbsent(candidate.getUri(), candidate);
+    }
 }
 
 private List<RecipeCandidate> preRankCandidates(List<RecipeCandidate> candidates, PerformanceManifest performanceManifest) {

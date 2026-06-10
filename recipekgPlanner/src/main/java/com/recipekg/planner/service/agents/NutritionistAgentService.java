@@ -55,6 +55,15 @@ public class NutritionistAgentService {
     @Value("${gemini.api-key}")
     private String apiKey;
 
+    @Value("${gemini.nutritionist-model:gemini-3-flash-preview}")
+    private String nutritionistModel;
+
+    @Value("${gemini.nutritionist-selection-model:gemini-2.5-flash-lite}")
+    private String nutritionistSelectionModel;
+
+    @Value("${gemini.nutritionist-repair-model:gemini-2.5-flash-lite}")
+    private String nutritionistRepairModel;
+
     @Value("${nutritionist.batch-size:30}")
     private int batchSize;
 
@@ -108,13 +117,36 @@ public class NutritionistAgentService {
             return errorPlan(performanceManifest, sessionId, traces, "Nutritionist could not create a usable recipe shortlist.");
         }
 
-        NutritionPlan currentPlan = buildFinalPlan(profile, medicalManifest, performanceManifest, recipeById, shortlisted);
+        PlanAttempt finalAttempt = buildFinalPlan(profile, medicalManifest, performanceManifest, recipeById, shortlisted);
+        NutritionPlan currentPlan = finalAttempt.plan();
         if (currentPlan == null) {
+            traces.add(planTrace(
+                    traces.size() + 1,
+                    "PLAN_BUILD",
+                    shortlisted,
+                    null,
+                    new ValidationResult("ERROR", List.of()),
+                    finalAttempt.promptText(),
+                    finalAttempt.responseText(),
+                    finalAttempt.errorMessage(),
+                    finalAttempt.model()
+            ));
+            logIteration(sessionId, traces.get(traces.size() - 1));
             return errorPlan(performanceManifest, sessionId, traces, "Nutritionist could not create a 7-day plan.");
         }
 
         ValidationResult validation = validationBrainService.validate(currentPlan, performanceManifest, medicalManifest, recipeById);
-        traces.add(planTrace(traces.size() + 1, "PLAN_BUILD", shortlisted, currentPlan, validation));
+        traces.add(planTrace(
+                traces.size() + 1,
+                "PLAN_BUILD",
+                shortlisted,
+                currentPlan,
+                validation,
+                finalAttempt.promptText(),
+                finalAttempt.responseText(),
+                finalAttempt.errorMessage(),
+                finalAttempt.model()
+        ));
         logIteration(sessionId, traces.get(traces.size() - 1));
 
         if (validation.passed()) {
@@ -129,7 +161,7 @@ public class NutritionistAgentService {
             );
             List<RecipeCandidate> repairCandidates = repairCandidatePool(recipeById, currentPlan, unusedCandidates);
 
-            currentPlan = repairPlan(
+            PlanAttempt repairAttempt = repairPlan(
                     profile,
                     medicalManifest,
                     performanceManifest,
@@ -138,12 +170,35 @@ public class NutritionistAgentService {
                     validation,
                     repairCandidates
             );
+            currentPlan = repairAttempt.plan();
             if (currentPlan == null) {
+                traces.add(planTrace(
+                        traces.size() + 1,
+                        "REPAIR",
+                        repairCandidates,
+                        null,
+                        new ValidationResult("ERROR", List.of()),
+                        repairAttempt.promptText(),
+                        repairAttempt.responseText(),
+                        repairAttempt.errorMessage(),
+                        repairAttempt.model()
+                ));
+                logIteration(sessionId, traces.get(traces.size() - 1));
                 return errorPlan(performanceManifest, sessionId, traces, "Nutritionist could not repair the 7-day plan.");
             }
 
             validation = validationBrainService.validate(currentPlan, performanceManifest, medicalManifest, recipeById);
-            traces.add(planTrace(traces.size() + 1, "REPAIR", repairCandidates, currentPlan, validation));
+            traces.add(planTrace(
+                    traces.size() + 1,
+                    "REPAIR",
+                    repairCandidates,
+                    currentPlan,
+                    validation,
+                    repairAttempt.promptText(),
+                    repairAttempt.responseText(),
+                    repairAttempt.errorMessage(),
+                    repairAttempt.model()
+            ));
             logIteration(sessionId, traces.get(traces.size() - 1));
 
             if (validation.passed()) {
@@ -204,9 +259,12 @@ public class NutritionistAgentService {
         Map<String, String> idByUri = idByUri(recipeById);
         int iteration = 1;
         for (List<RecipeCandidate> batch : batches) {
+            String prompt = null;
+            String geminiResponse = null;
+            String errorMessage = null;
             try {
                 Set<String> allowedThisRound = allowedSelectionIds(state, batch, idByUri);
-                String prompt = buildBatchSelectionPrompt(
+                prompt = buildBatchSelectionPrompt(
                         profile,
                         medicalManifest,
                         performanceManifest,
@@ -215,14 +273,16 @@ public class NutritionistAgentService {
                         state,
                         iteration
                 );
-                String geminiResponse=callGemini(prompt);
+                logPromptSize("BATCH_SELECTION", iteration, prompt);
+                geminiResponse=callGemini(prompt, nutritionistSelectionModel);
                 NutritionistSelectionState rawState = parseSelectionState(geminiResponse);
                 state = batchSelectionService.normalizeState(rawState, allowedThisRound, shortlistSize);
             } catch (Exception e) {
+                errorMessage = rootCauseMessage(e);
                 System.err.println("Nutritionist batch selection failed: " + e.getMessage());
             }
 
-            traces.add(selectionTrace(iteration, batch, state));
+            traces.add(selectionTrace(iteration, batch, state, prompt, geminiResponse, errorMessage, nutritionistSelectionModel));
             logIteration(sessionId, traces.get(traces.size() - 1));
             iteration++;
         }
@@ -248,7 +308,7 @@ public class NutritionistAgentService {
         return allowed;
     }
 
-    private NutritionPlan buildFinalPlan(
+    private PlanAttempt buildFinalPlan(
             UserProfile profile,
             MedicalManifest medicalManifest,
             PerformanceManifest performanceManifest,
@@ -258,19 +318,24 @@ public class NutritionistAgentService {
         List<RecipeBrief> briefs = buildRecipeBriefs(recipeById, candidates);
         if (briefs.isEmpty()) {
             System.err.println("Nutritionist final plan failed: no shortlisted recipe briefs were available.");
-            return null;
+            return new PlanAttempt(null, null, null, "No shortlisted recipe briefs were available.", nutritionistModel);
         }
 
+        String prompt = null;
+        String geminiResponse = null;
         try {
-            String prompt = buildFinalPlanPrompt(profile, medicalManifest, performanceManifest, briefs);
-            return hydrateAndCompute(parseRawPlan(callGemini(prompt)), recipeById);
+            prompt = buildFinalPlanPrompt(profile, medicalManifest, performanceManifest, briefs);
+            logPromptSize("PLAN_BUILD", 0, prompt);
+            geminiResponse = callGemini(prompt, nutritionistModel);
+            NutritionPlan plan = hydrateAndCompute(parseRawPlan(geminiResponse), recipeById);
+            return new PlanAttempt(plan, prompt, geminiResponse, null, nutritionistModel);
         } catch (Exception e) {
             System.err.println("Nutritionist final plan failed: " + e.getMessage());
-            return null;
+            return new PlanAttempt(null, prompt, geminiResponse, rootCauseMessage(e), nutritionistModel);
         }
     }
 
-    private NutritionPlan repairPlan(
+    private PlanAttempt repairPlan(
             UserProfile profile,
             MedicalManifest medicalManifest,
             PerformanceManifest performanceManifest,
@@ -280,10 +345,14 @@ public class NutritionistAgentService {
             List<RecipeCandidate> repairCandidates
     ) {
         List<RecipeBrief> briefs = buildRecipeBriefs(recipeById, repairCandidates);
-        if (briefs.isEmpty()) return currentPlan;
+        if (briefs.isEmpty()) {
+            return new PlanAttempt(currentPlan, null, null, "No repair recipe briefs were available.", nutritionistRepairModel);
+        }
 
+        String prompt = null;
+        String geminiResponse = null;
         try {
-            String prompt = buildRepairPrompt(
+            prompt = buildRepairPrompt(
                     profile,
                     medicalManifest,
                     performanceManifest,
@@ -291,12 +360,23 @@ public class NutritionistAgentService {
                     currentPlan,
                     validationResult
             );
-            return hydrateAndCompute(parseRawPlan(callGemini(prompt)), recipeById);
+            logPromptSize("REPAIR", 0, prompt);
+            geminiResponse = callGemini(prompt, nutritionistRepairModel);
+            NutritionPlan plan = hydrateAndCompute(parseRawPlan(geminiResponse), recipeById);
+            return new PlanAttempt(plan, prompt, geminiResponse, null, nutritionistRepairModel);
         } catch (Exception e) {
             System.err.println("Nutritionist repair failed: " + e.getMessage());
-            return null;
+            return new PlanAttempt(null, prompt, geminiResponse, rootCauseMessage(e), nutritionistRepairModel);
         }
     }
+
+    private record PlanAttempt(
+            NutritionPlan plan,
+            String promptText,
+            String responseText,
+            String errorMessage,
+            String model
+    ) {}
 
     private Map<String, RecipeCandidate> assignRecipeIds(List<RecipeCandidate> recipes) {
         Map<String, RecipeCandidate> byId = new LinkedHashMap<>();
@@ -337,6 +417,49 @@ public class NutritionistAgentService {
                 .toList();
     }
 
+    private List<Map<String, Object>> buildCompactRecipeBriefs(
+            Map<String, RecipeCandidate> recipeById,
+            List<RecipeCandidate> candidates,
+            int ingredientLimit,
+            int unresolvedLimit
+    ) {
+        if (candidates == null || candidates.isEmpty()) return List.of();
+
+        Map<String, String> idByUri = idByUri(recipeById);
+        return candidates.stream()
+                .filter(Objects::nonNull)
+                .map(recipe -> compactRecipeBrief(idByUri.get(recipe.getUri()), recipe, ingredientLimit, unresolvedLimit))
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private Map<String, Object> compactRecipeBrief(
+            String id,
+            RecipeCandidate recipe,
+            int ingredientLimit,
+            int unresolvedLimit
+    ) {
+        if (id == null || recipe == null) return null;
+
+        Map<String, Object> brief = new LinkedHashMap<>();
+        brief.put("id", id);
+        brief.put("label", safe(recipe.getLabel()));
+        brief.put("macros", macros(recipe));
+        brief.put("servings", safeDouble(recipe.getServings()));
+        brief.put("ingredients", keyIngredients(recipe).stream()
+                .limit(Math.max(0, ingredientLimit))
+                .toList());
+
+        List<String> unresolved = unresolvedIngredients(recipe).stream()
+                .limit(Math.max(0, unresolvedLimit))
+                .toList();
+        if (!unresolved.isEmpty()) {
+            brief.put("unresolved", unresolved);
+        }
+
+        return brief;
+    }
+
     private String buildBatchSelectionPrompt(
             UserProfile profile,
             MedicalManifest medicalManifest,
@@ -346,40 +469,25 @@ public class NutritionistAgentService {
             NutritionistSelectionState currentState,
             int batchNumber
     ) throws Exception {
-        List<RecipeBrief> batchBriefs = buildRecipeBriefs(recipeById, batch);
-        List<RecipeBrief> currentShortlist = buildRecipeBriefs(
+        List<Map<String, Object>> batchBriefs = buildCompactRecipeBriefs(recipeById, batch, 5, 3);
+        List<Map<String, Object>> currentShortlist = buildCompactRecipeBriefs(
                 recipeById,
-                batchSelectionService.selectedCandidates(currentState, recipeById)
+                batchSelectionService.selectedCandidates(currentState, recipeById),
+                4,
+                2
         );
 
         return """
-You are a nutritionist recipe scout.
-
-Your job is NOT to build the final 7-day plan yet.
-Your job is to maintain a rolling shortlist of recipe IDs that could become a strong 7-day plan.
-Do not use hidden numeric scoring. Compare recipes with nutrition judgment.
-Macros are USDA-derived estimates from ingredient mappings and portion inference; use them as signals, not ground truth.
-If a macro value looks implausible for the label or ingredients, discount it and mention the concern.
-
-Selection priorities:
-- Fit the user's goal, activity level, and performance targets.
-- Respect medical constraints.
-- Keep useful coverage for breakfast, lunch, dinner, snacks, and optional desserts.
-- Prefer variety across proteins, carbs, vegetables, cuisines, textures, and meal sizes.
-- Keep recipes with unresolved ingredients if they are still useful, but be cautious when unresolved ingredients seem nutritionally important.
-- In later batches, replace earlier choices when a new recipe is clearly more useful. Do not preserve previous choices out of inertia.
-
-Return strict JSON only.
-Use only recipe IDs present in CURRENT_SHORTLIST or NEW_BATCH.
-Keep at most %d recipes in selectedRecipeIds.
+You are a nutritionist recipe scout. Maintain a rolling shortlist; do not build the 7-day plan yet.
+Rules: use only IDs in CURRENT_SHORTLIST or NEW_BATCH; max %d selected IDs; respect medical caps/exclusions; prefer goal fit, variety, usable macros, and meal-slot coverage. Keep 5-7 breakfast-suitable recipes when available. Judge breakfast suitability from label, ingredients, preparation style, and practical context. Do not choose breakfast coverage only by macro density. USDA macros are estimates; note implausible values or important unresolved ingredients.
 
 USER_PROFILE:
 %s
 
-MEDICAL_MANIFEST:
+MEDICAL:
 %s
 
-PERFORMANCE_MANIFEST:
+TARGETS:
 %s
 
 BATCH_NUMBER:
@@ -405,17 +513,17 @@ OUTPUT_SCHEMA:
       "reason": "short reason"
     }
   ],
-  "missingNeeds": ["short notes about what the shortlist still lacks"],
+  "missingNeeds": ["short notes about what the shortlist still lacks, including breakfast gaps"],
   "nutritionConcerns": ["short notes about sodium, implausible macros, unresolved important ingredients, etc."],
-  "planningNotes": ["short notes useful for the final plan builder"]
+  "planningNotes": ["short notes useful for the final plan builder, including which selected recipes seem most breakfast-suitable"]
 }
 """.formatted(
                 Math.max(1, shortlistSize),
                 mapper.writeValueAsString(compactProfile(profile)),
                 mapper.writeValueAsString(compactMedical(medicalManifest)),
-                mapper.writeValueAsString(performanceManifest),
+                mapper.writeValueAsString(compactPerformance(performanceManifest)),
                 batchNumber,
-                mapper.writeValueAsString(currentState),
+                mapper.writeValueAsString(compactSelectionState(currentState)),
                 mapper.writeValueAsString(currentShortlist),
                 mapper.writeValueAsString(batchBriefs)
         );
@@ -427,14 +535,10 @@ OUTPUT_SCHEMA:
             PerformanceManifest performanceManifest,
             List<RecipeBrief> briefs
     ) throws Exception {
-        return planningBasePrompt(profile, medicalManifest, performanceManifest, briefs) + """
+        return planningBasePrompt(profile, medicalManifest, performanceManifest, briefs, 8, 4) + """
 
 TASK:
-Build the final 7-day plan from the shortlisted recipes.
-Variety target: use at least 18 unique recipe IDs across the week when the shortlist contains 18 or more recipes.
-If the shortlist has fewer than 18 recipes, use as many distinct recipes as practical.
-Use fewer than 18 unique recipes only when necessary to satisfy mandatory medical constraints.
-Before returning JSON, count recipeId usage across the whole week. No recipe may appear more than 2 times.
+Build the final 7-day plan. Use at least 18 unique recipe IDs when 18+ are available, otherwise use as many distinct IDs as practical. Use fewer only for medical constraints. Count recipe usage before answering; max 2 uses per recipe/week.
 """;
     }
 
@@ -446,8 +550,8 @@ Before returning JSON, count recipeId usage across the whole week. No recipe may
             NutritionPlan currentPlan,
             ValidationResult validationResult
     ) throws Exception {
-        String currentPlanJson = mapper.writeValueAsString(compactPlan(currentPlan));
-        String validationJson = mapper.writeValueAsString(validationResult);
+        String currentPlanJson = mapper.writeValueAsString(compactPlanForRepair(currentPlan, validationResult));
+        String validationJson = mapper.writeValueAsString(compactValidation(validationResult));
         String repairGuidanceJson = mapper.writeValueAsString(repairGuidance(
                 currentPlan,
                 validationResult,
@@ -455,7 +559,7 @@ Before returning JSON, count recipeId usage across the whole week. No recipe may
                 medicalManifest
         ));
 
-        return planningBasePrompt(profile, medicalManifest, performanceManifest, briefs) + """
+        return planningBasePrompt(profile, medicalManifest, performanceManifest, briefs, 5, 3) + """
 
 CURRENT_PLAN:
 %s
@@ -467,27 +571,7 @@ NUMERIC_REPAIR_GUIDANCE:
 %s
 
 TASK:
-Repair the current plan while changing as little as possible.
-Priority order:
-1. Never exceed medical nutrient caps.
-2. Keep breakfast, lunch, and dinner present.
-3. Hit at least the validated minimum calories and protein.
-4. Minimize recipe repetition and preserve variety.
-
-Use NUMERIC_REPAIR_GUIDANCE to repair precisely:
-- For medical cap excesses, reduce the listed excess amount while keeping calories/protein adequate.
-- For calorie/protein deficits, add at least the listed deficit using recipes that do not create new cap excesses.
-- Keep days listed under passingDays unchanged.
-- Only change passing days if a global issue, such as recipe repetition, cannot be fixed any other way.
-AVAILABLE_RECIPE_CANDIDATES includes the current plan recipes plus replacement options.
-Variety target: when AVAILABLE_RECIPE_CANDIDATES has 18 or more recipes, use at least 18 unique recipe IDs across the repaired week.
-If AVAILABLE_RECIPE_CANDIDATES has 30 or more recipes, prefer 18 to 24 unique recipe IDs.
-Do not collapse the repaired plan to a small recipe subset unless that is the only way to satisfy medical caps.
-Keep non-problem meals when they still fit, but replace enough repeated meals to satisfy every validation issue.
-Hard constraint: no recipeId may appear more than 2 times in the returned week. There are no exceptions.
-If the current plan has 4 meals/day and repetition is hard to fix, use 3 meals/day on some days instead of repeating recipes.
-Before returning JSON, count recipeId usage across the whole week and fix any count above 2.
-Return the complete corrected 7-day plan, not a patch.
+Repair the plan with minimal changes. Priority: medical caps, breakfast/lunch/dinner present, breakfast appropriateness by your judgment, calorie/protein minimums, repetition/variety. Use NUMERIC_REPAIR_GUIDANCE exactly. Keep passing days unchanged unless needed for global repetition. Max 2 uses per recipe/week. Prefer 18-24 unique IDs when enough candidates exist. Return the complete corrected 7-day plan, not a patch.
 """.formatted(currentPlanJson, validationJson, repairGuidanceJson);
     }
 
@@ -637,29 +721,20 @@ Return the complete corrected 7-day plan, not a patch.
             UserProfile profile,
             MedicalManifest medicalManifest,
             PerformanceManifest performanceManifest,
-            List<RecipeBrief> briefs
+            List<RecipeBrief> briefs,
+            int ingredientLimit,
+            int unresolvedLimit
     ) throws Exception {
         return """
-You are a certified sports nutritionist and meal-planning agent.
-
-Build a practical 7-day meal plan using ONLY the provided recipe candidates.
-The user has already passed medical safety filtering. Medical constraints, if present, remain mandatory.
-Performance targets guide the plan.
-Recipe macros are estimates from USDA mappings and portion inference; do not treat them as perfect ground truth.
-Use nutrition judgment when a macro value appears implausible for the recipe label or ingredients.
-
-Return strict JSON only.
-Do not invent recipes.
-Do not invent ingredients.
-Use only recipe IDs from AVAILABLE_RECIPE_CANDIDATES.
+You are a certified sports nutritionist. Build a practical 7-day plan using ONLY candidate IDs. JSON only. Do not invent recipes/ingredients. USDA macros are estimates; use nutrition judgment for implausible values.
 
 USER_PROFILE:
 %s
 
-MEDICAL_MANIFEST:
+MEDICAL:
 %s
 
-PERFORMANCE_MANIFEST:
+TARGETS:
 %s
 
 AVAILABLE_RECIPE_CANDIDATES:
@@ -667,17 +742,13 @@ AVAILABLE_RECIPE_CANDIDATES:
 
 
 RULES:
-1. Build exactly 7 days.
-2. Each day should contain 3 to 5 meals.
-3. Prefer breakfast, lunch, and dinner every day.
-4. Add snack or dessert only when useful.
-5. Serving counts may be 0.5, 1.0, 1.5, or 2.0.
-6. Hard repetition cap: no recipe ID may appear more than 2 times in the entire week. There are no exceptions.
-7. Do not rank recipes by a hidden score. Choose them because they make nutritional and practical sense.
-8. Be cautious with implausible macro values or recipes with important unresolved ingredients.
-9. Medical constraints are mandatory.
-10. Before returning JSON, count every recipeId occurrence. If any recipeId appears 3 or more times, revise before answering.
-11. Output recipe IDs only, not full recipe objects.
+1. Exactly 7 days; 3-5 meals/day; include breakfast/lunch/dinner daily.
+2. Breakfast: choose recipes you judge breakfast-suitable from label, ingredients, preparation style, and context when available. Do not choose breakfast solely for macro density.
+3. Medical constraints are mandatory.
+4. Servings allowed: 0.5, 1.0, 1.5, 2.0.
+5. Max 2 uses per recipe ID/week; count before answering.
+6. Add snack/dessert only when useful.
+7. Output recipe IDs only, not full recipe objects.
 
 OUTPUT_SCHEMA:
 {
@@ -701,24 +772,29 @@ OUTPUT_SCHEMA:
 """.formatted(
                 mapper.writeValueAsString(compactProfile(profile)),
                 mapper.writeValueAsString(compactMedical(medicalManifest)),
-                mapper.writeValueAsString(performanceManifest),
-                mapper.writeValueAsString(briefs)
+                mapper.writeValueAsString(compactPerformance(performanceManifest)),
+                mapper.writeValueAsString(compactRecipeBriefs(briefs, ingredientLimit, unresolvedLimit))
         );
     }
 
     private String callGemini(String prompt) {
+        return callGemini(prompt, nutritionistModel);
+    }
+
+    private String callGemini(String prompt, String model) {
         int maxAttempts = Math.max(1, retry503Attempts + 1);
         RuntimeException lastError = null;
+        String modelId = safeModel(model);
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
-                return callGeminiOnce(prompt);
+                return callGeminiOnce(prompt, modelId);
             } catch (WebClientResponseException e) {
                 lastError = e;
                 if (!isRetryableGeminiStatus(e) || attempt >= maxAttempts) break;
 
                 retryAfterDelay(
-                        "Gemini returned " + e.getStatusCode().value() + " " + e.getStatusText(),
+                        "Gemini model " + modelId + " returned " + e.getStatusCode().value() + " " + e.getStatusText(),
                         attempt,
                         maxAttempts
                 );
@@ -765,15 +841,18 @@ OUTPUT_SCHEMA:
         return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
     }
 
-    private String callGeminiOnce(String prompt) {
+    private String callGeminiOnce(String prompt, String model) {
         Map<String, Object> body = Map.of(
                 "contents", new Object[]{
                         Map.of("parts", new Object[]{Map.of("text", prompt)})
-                }
+                },
+                "generationConfig", Map.of(
+                        "responseMimeType", "application/json"
+                )
         );
 
         String raw = webClient.post()
-                .uri("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey)
+                .uri("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + apiKey)
                 .bodyValue(body)
                 .retrieve()
                 .bodyToMono(String.class)
@@ -804,7 +883,7 @@ OUTPUT_SCHEMA:
     }
 
     private NutritionistSelectionState parseSelectionState(String jsonText) throws Exception {
-        JsonNode node = mapper.readTree(stripCodeFence(jsonText));
+        JsonNode node = mapper.readTree(extractJsonPayload(jsonText));
         if (node.isArray() && !node.isEmpty()) {
             node = node.get(0);
         }
@@ -812,7 +891,7 @@ OUTPUT_SCHEMA:
     }
 
     private NutritionistRawPlan parseRawPlan(String jsonText) throws Exception {
-        JsonNode node = mapper.readTree(stripCodeFence(jsonText));
+        JsonNode node = mapper.readTree(extractJsonPayload(jsonText));
         if (node.isArray() && !node.isEmpty()) {
             node = node.get(0);
         }
@@ -917,15 +996,24 @@ OUTPUT_SCHEMA:
     private PlanningIterationTrace selectionTrace(
             int iterationNumber,
             List<RecipeCandidate> candidates,
-            NutritionistSelectionState state
+            NutritionistSelectionState state,
+            String promptText,
+            String responseText,
+            String errorMessage,
+            String model
     ) {
+        boolean failed = errorMessage != null && !errorMessage.isBlank();
         return new PlanningIterationTrace(
                 iterationNumber,
                 "BATCH_SELECTION",
                 candidateUris(candidates),
                 state.selectedRecipeIds(),
-                new ValidationResult("SELECTED", List.of()),
-                "SELECTED"
+                new ValidationResult(failed ? "ERROR" : "SELECTED", List.of()),
+                failed ? "ERROR" : "SELECTED",
+                promptText,
+                responseText,
+                errorMessage,
+                model
         );
     }
 
@@ -934,15 +1022,27 @@ OUTPUT_SCHEMA:
             String phase,
             List<RecipeCandidate> candidates,
             NutritionPlan plan,
-            ValidationResult validation
+            ValidationResult validation,
+            String promptText,
+            String responseText,
+            String errorMessage,
+            String model
     ) {
+        boolean failed = errorMessage != null && !errorMessage.isBlank();
+        ValidationResult safeValidation = validation == null
+                ? new ValidationResult(failed ? "ERROR" : "REVISE", List.of())
+                : validation;
         return new PlanningIterationTrace(
                 iterationNumber,
                 phase,
                 candidateUris(candidates),
                 selectedIds(plan),
-                validation,
-                validation.passed() ? "PASS" : "REVISE"
+                safeValidation,
+                failed ? "ERROR" : safeValidation.passed() ? "PASS" : "REVISE",
+                promptText,
+                responseText,
+                errorMessage,
+                model
         );
     }
 
@@ -995,6 +1095,86 @@ OUTPUT_SCHEMA:
                     }).toList());
                     dayMap.put("estimatedTotals", day.estimatedTotals());
                     return dayMap;
+                })
+                .toList();
+    }
+
+    private List<Map<String, Object>> compactPlanForRepair(NutritionPlan plan, ValidationResult validationResult) {
+        if (plan == null || plan.days() == null) return List.of();
+
+        Set<Integer> problemDays = validationResult == null || validationResult.issues() == null
+                ? Set.of()
+                : validationResult.issues().stream()
+                .map(ValidationIssue::day)
+                .filter(day -> day > 0)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+
+        boolean hasGlobalIssues = validationResult != null
+                && validationResult.issues() != null
+                && validationResult.issues().stream().anyMatch(issue -> issue.day() <= 0);
+
+        return plan.days().stream()
+                .filter(day -> hasGlobalIssues || problemDays.contains(day.day()))
+                .map(day -> {
+                    Map<String, Object> dayMap = new LinkedHashMap<>();
+                    dayMap.put("day", day.day());
+                    dayMap.put("meals", day.meals().stream().map(meal -> {
+                        Map<String, Object> mealMap = new LinkedHashMap<>();
+                        mealMap.put("slot", meal.slot());
+                        mealMap.put("recipeId", meal.recipeId());
+                        mealMap.put("servings", meal.servings());
+                        return mealMap;
+                    }).toList());
+                    dayMap.put("totals", day.estimatedTotals());
+                    return dayMap;
+                })
+                .toList();
+    }
+
+    private Map<String, Object> compactValidation(ValidationResult validationResult) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        if (validationResult == null) {
+            map.put("status", "");
+            map.put("issues", List.of());
+            return map;
+        }
+
+        map.put("status", validationResult.status());
+        map.put("issues", validationResult.issues() == null ? List.of() : validationResult.issues().stream()
+                .map(issue -> {
+                    Map<String, Object> issueMap = new LinkedHashMap<>();
+                    issueMap.put("type", issue.type());
+                    issueMap.put("day", issue.day());
+                    issueMap.put("severity", issue.severity());
+                    issueMap.put("message", issue.message());
+                    return issueMap;
+                })
+                .toList());
+        return map;
+    }
+
+    private List<Map<String, Object>> compactRecipeBriefs(List<RecipeBrief> briefs, int ingredientLimit, int unresolvedLimit) {
+        if (briefs == null || briefs.isEmpty()) return List.of();
+
+        return briefs.stream()
+                .filter(Objects::nonNull)
+                .map(brief -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", brief.id());
+                    map.put("label", brief.label());
+                    map.put("macros", brief.macrosPerServing());
+                    map.put("servings", brief.servings());
+                    map.put("ingredients", brief.ingredients() == null ? List.of() : brief.ingredients().stream()
+                            .limit(Math.max(0, ingredientLimit))
+                            .toList());
+
+                    List<String> unresolved = brief.unresolvedIngredients() == null ? List.of() : brief.unresolvedIngredients().stream()
+                            .limit(Math.max(0, unresolvedLimit))
+                            .toList();
+                    if (!unresolved.isEmpty()) {
+                        map.put("unresolved", unresolved);
+                    }
+                    return map;
                 })
                 .toList();
     }
@@ -1072,8 +1252,106 @@ OUTPUT_SCHEMA:
         if (manifest == null) return Map.of();
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("status", manifest.status());
-        map.put("constraints", manifest.constraints());
+        if (manifest.constraints() != null) {
+            map.put("exclude", manifest.constraints().hardExclusions() == null ? List.of() : manifest.constraints().hardExclusions());
+            map.put("caps", manifest.constraints().nutrientCaps() == null ? List.of() : manifest.constraints().nutrientCaps().stream()
+                    .map(cap -> Map.of(
+                            "nutrient", safe(cap.nutrient()),
+                            "max", round(cap.maxValue()),
+                            "unit", safe(cap.unit())
+                    ))
+                    .toList());
+            map.put("boosts", manifest.constraints().requiredBoosts() == null ? List.of() : manifest.constraints().requiredBoosts());
+        }
         return map;
+    }
+
+    private Map<String, Object> compactPerformance(PerformanceManifest manifest) {
+        if (manifest == null) return Map.of();
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("goal", manifest.goalStatus());
+        map.put("daily", compactTargets(manifest.dailyTargets()));
+        return map;
+    }
+
+    private Map<String, Object> compactTargets(List<NutrientTarget> targets) {
+        if (targets == null || targets.isEmpty()) return Map.of();
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        for (NutrientTarget target : targets) {
+            if (target == null || target.nutrient() == null) continue;
+
+            Map<String, Object> targetMap = new LinkedHashMap<>();
+            if (target.min() != null) targetMap.put("min", round(target.min()));
+            if (target.target() != null) targetMap.put("target", round(target.target()));
+            if (target.max() != null) targetMap.put("max", round(target.max()));
+            targetMap.put("unit", safe(target.unit()));
+            map.put(normalizeText(target.nutrient()), targetMap);
+        }
+        return map;
+    }
+
+    private Map<String, Object> compactSelectionState(NutritionistSelectionState state) {
+        if (state == null) return Map.of();
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("selectedRecipeIds", state.selectedRecipeIds() == null ? List.of() : state.selectedRecipeIds());
+        map.put("missingNeeds", lastItems(state.missingNeeds(), 4));
+        map.put("nutritionConcerns", lastItems(state.nutritionConcerns(), 5));
+        map.put("planningNotes", lastItems(state.planningNotes(), 4));
+        return map;
+    }
+
+    private List<String> lastItems(List<String> values, int maxItems) {
+        if (values == null || values.isEmpty() || maxItems <= 0) return List.of();
+        int fromIndex = Math.max(0, values.size() - maxItems);
+        return values.subList(fromIndex, values.size());
+    }
+
+    private void logPromptSize(String phase, int iteration, String prompt) {
+        System.out.printf(
+                "Nutritionist prompt phase=%s iteration=%d chars=%d%n",
+                phase,
+                iteration,
+                prompt == null ? 0 : prompt.length()
+        );
+    }
+
+    private String safeModel(String model) {
+        return model == null || model.isBlank()
+                ? "gemini-3-flash-preview"
+                : model.trim();
+    }
+
+    private String extractJsonPayload(String text) {
+        String trimmed = stripCodeFence(text);
+        if (trimmed.isBlank()) return trimmed;
+
+        int objectStart = trimmed.indexOf('{');
+        int arrayStart = trimmed.indexOf('[');
+        int start;
+
+        if (objectStart < 0) {
+            start = arrayStart;
+        } else if (arrayStart < 0) {
+            start = objectStart;
+        } else {
+            start = Math.min(objectStart, arrayStart);
+        }
+
+        if (start < 0) {
+            return trimmed;
+        }
+
+        char opener = trimmed.charAt(start);
+        char closer = opener == '[' ? ']' : '}';
+        int end = trimmed.lastIndexOf(closer);
+        if (end <= start) {
+            return trimmed.substring(start).trim();
+        }
+
+        return trimmed.substring(start, end + 1).trim();
     }
 
     private String stripCodeFence(String text) {
