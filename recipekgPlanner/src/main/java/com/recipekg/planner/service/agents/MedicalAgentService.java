@@ -4,34 +4,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.recipekg.planner.model.MedicalManifest;
 import com.recipekg.planner.model.UserProfile;
-import org.springframework.beans.factory.annotation.Value;
+import com.recipekg.planner.service.ai.NvidiaChatClient;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
-import org.springframework.web.reactive.function.client.WebClientRequestException;
-import org.springframework.web.reactive.function.client.WebClientResponseException;
-
-import java.util.Map;
 
 @Service
 public class MedicalAgentService {
 
-    private final WebClient webClient;
+    private final NvidiaChatClient nvidiaChatClient;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    @Value("${gemini.api-key}")
-    private String apiKey;
-
-    @Value("${gemini.retry-503-attempts:5}")
-    private int retry503Attempts;
-
-    @Value("${gemini.retry-base-delay-ms:10000}")
-    private long retryBaseDelayMillis;
-
-    @Value("${gemini.retry-max-delay-ms:90000}")
-    private long retryMaxDelayMillis;
-
-    public MedicalAgentService(WebClient webClient) {
-        this.webClient = webClient;
+    public MedicalAgentService(NvidiaChatClient nvidiaChatClient) {
+        this.nvidiaChatClient = nvidiaChatClient;
     }
 
 
@@ -97,115 +80,18 @@ public class MedicalAgentService {
                 profile.getDiseases()
         );
 
-        Map<String, Object> body = Map.of(
-                "contents", new Object[]{
-                        Map.of("parts", new Object[]{
-                                Map.of("text", prompt)
-                        })
-                },
-                "generationConfig", Map.of(
-                        "responseMimeType", "application/json"
-                )
-        );
-
-        String raw = callGemini(body);
+        String raw = nvidiaChatClient.complete(prompt);
 
         try {
-            JsonNode node = mapper.readTree(raw);
-            String jsonText = node.get("candidates")
-                    .get(0)
-                    .get("content")
-                    .get("parts")
-                    .get(0)
-                    .get("text")
-                    .asText();
-
-            return parseMedicalManifest(jsonText);
+            return parseMedicalManifest(raw);
 
         } catch (Exception e) {
-            throw new RuntimeException("Failed to parse Gemini response into MedicalManifest", e);
+            throw new RuntimeException("Failed to parse NVIDIA response into MedicalManifest", e);
         }
     }
 
-        private String callGemini(Map<String, Object> body) {
-                int maxAttempts = Math.max(1, retry503Attempts + 1);
-                RuntimeException lastError = null;
-
-                for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-                        try {
-                                return callGeminiOnce(body);
-                        } catch (WebClientResponseException e) {
-                                lastError = e;
-                                if (!isRetryableGeminiStatus(e) || attempt >= maxAttempts) break;
-
-                                retryAfterDelay(
-                                        "Medical agent Gemini call returned " + e.getStatusCode().value() + " " + e.getStatusText(),
-                                        attempt,
-                                        maxAttempts
-                                );
-                        } catch (WebClientRequestException e) {
-                                lastError = e;
-                                if (attempt >= maxAttempts) break;
-
-                                retryAfterDelay("Medical agent Gemini request failed before receiving a response: " + rootCauseMessage(e), attempt, maxAttempts);
-                        }
-                }
-
-                throw lastError == null ? new RuntimeException("Medical agent Gemini request failed") : lastError;
-        }
-
-        private String callGeminiOnce(Map<String, Object> body) {
-                return webClient.post()
-                        .uri("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey)
-                        .bodyValue(body)
-                        .retrieve()
-                        .bodyToMono(String.class)
-                        .block();
-        }
-
-        private void retryAfterDelay(String reason, int attempt, int maxAttempts) {
-                long delayMillis = retryDelayMillis(attempt);
-                System.err.printf(
-                        "%s; retrying attempt %d/%d after %dms.%n",
-                        reason,
-                        attempt + 1,
-                        maxAttempts,
-                        delayMillis
-                );
-                sleepBeforeRetry(delayMillis);
-        }
-
-        private boolean isRetryableGeminiStatus(WebClientResponseException exception) {
-                int status = exception.getStatusCode().value();
-                return status == 429 || status >= 500;
-        }
-
-        private long retryDelayMillis(int attempt) {
-                long multiplier = 1L << Math.min(attempt - 1, 4);
-                long delay = retryBaseDelayMillis * multiplier;
-                return Math.min(delay, retryMaxDelayMillis);
-        }
-
-        private String rootCauseMessage(Throwable throwable) {
-                Throwable current = throwable;
-                while (current.getCause() != null) {
-                        current = current.getCause();
-                }
-                String message = current.getMessage();
-                return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
-        }
-
-        private void sleepBeforeRetry(long delayMillis) {
-                try {
-                        Thread.sleep(delayMillis);
-                } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new RuntimeException("Interrupted while waiting to retry Medical agent Gemini request", e);
-                }
-        }
-
         private MedicalManifest parseMedicalManifest(String jsonText) throws Exception {
-                String trimmed = jsonText == null ? "" : jsonText.trim();
+                String trimmed = extractJsonPayload(jsonText);
 
                 if (trimmed.startsWith("```")) {
                         int firstLineEnd = trimmed.indexOf('\n');
@@ -227,5 +113,34 @@ public class MedicalAgentService {
                 }
 
                 return mapper.readValue(trimmed, MedicalManifest.class);
+        }
+
+        private String extractJsonPayload(String text) {
+                String trimmed = text == null ? "" : text.trim();
+                if (trimmed.startsWith("```")) {
+                        trimmed = trimmed.replaceFirst("^```(?:json)?", "").trim();
+                        trimmed = trimmed.replaceFirst("```$", "").trim();
+                }
+
+                int objectStart = trimmed.indexOf('{');
+                int arrayStart = trimmed.indexOf('[');
+                int start;
+
+                if (objectStart < 0) {
+                        start = arrayStart;
+                } else if (arrayStart < 0) {
+                        start = objectStart;
+                } else {
+                        start = Math.min(objectStart, arrayStart);
+                }
+
+                if (start < 0) return trimmed;
+
+                char opener = trimmed.charAt(start);
+                char closer = opener == '[' ? ']' : '}';
+                int end = trimmed.lastIndexOf(closer);
+                if (end <= start) return trimmed.substring(start).trim();
+
+                return trimmed.substring(start, end + 1).trim();
         }
 }

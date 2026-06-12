@@ -22,12 +22,10 @@ import com.recipekg.planner.model.ValidationIssue;
 import com.recipekg.planner.model.ValidationResult;
 import com.recipekg.planner.service.NutritionistBatchSelectionService;
 import com.recipekg.planner.service.ValidationBrainService;
+import com.recipekg.planner.service.ai.NvidiaChatClient;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClientRequestException;
-import org.springframework.web.reactive.function.client.WebClientResponseException;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -46,23 +44,14 @@ public class NutritionistAgentService {
 
     private static final Set<String> ALLOWED_SLOTS = Set.of("breakfast", "lunch", "dinner", "snack", "dessert");
 
-    private final WebClient webClient;
+    private final NvidiaChatClient nvidiaChatClient;
     private final NutritionistBatchSelectionService batchSelectionService;
     private final ValidationBrainService validationBrainService;
     private final ObjectMapper mapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-    @Value("${gemini.api-key}")
-    private String apiKey;
-
-    @Value("${gemini.nutritionist-model:gemini-3-flash-preview}")
-    private String nutritionistModel;
-
-    @Value("${gemini.nutritionist-selection-model:gemini-2.5-flash-lite}")
-    private String nutritionistSelectionModel;
-
-    @Value("${gemini.nutritionist-repair-model:gemini-2.5-flash-lite}")
-    private String nutritionistRepairModel;
+    @Value("${nvidia.model:nvidia/llama-3.3-nemotron-super-49b-v1.5}")
+    private String nvidiaModel;
 
     @Value("${nutritionist.batch-size:30}")
     private int batchSize;
@@ -78,15 +67,6 @@ public class NutritionistAgentService {
 
     @Value("${nutritionist.max-repair-iterations:3}")
     private int maxRepairIterations;
-
-    @Value("${gemini.retry-503-attempts:5}")
-    private int retry503Attempts;
-
-    @Value("${gemini.retry-base-delay-ms:10000}")
-    private long retryBaseDelayMillis;
-
-    @Value("${gemini.retry-max-delay-ms:90000}")
-    private long retryMaxDelayMillis;
 
     public NutritionPlan generateSevenDayPlan(
             UserProfile profile,
@@ -113,7 +93,7 @@ public class NutritionistAgentService {
 
         List<RecipeCandidate> shortlisted = batchSelectionService.selectedCandidates(selectionState, recipeById);
         if (shortlisted.isEmpty()) {
-            System.err.println("Nutritionist plan failed: Gemini did not produce a usable recipe shortlist.");
+            System.err.println("Nutritionist plan failed: NVIDIA did not produce a usable recipe shortlist.");
             return errorPlan(performanceManifest, sessionId, traces, "Nutritionist could not create a usable recipe shortlist.");
         }
 
@@ -274,7 +254,7 @@ public class NutritionistAgentService {
                         iteration
                 );
                 logPromptSize("BATCH_SELECTION", iteration, prompt);
-                geminiResponse=callGemini(prompt, nutritionistSelectionModel);
+                geminiResponse = callModel(prompt);
                 NutritionistSelectionState rawState = parseSelectionState(geminiResponse);
                 state = batchSelectionService.normalizeState(rawState, allowedThisRound, shortlistSize);
             } catch (Exception e) {
@@ -282,7 +262,7 @@ public class NutritionistAgentService {
                 System.err.println("Nutritionist batch selection failed: " + e.getMessage());
             }
 
-            traces.add(selectionTrace(iteration, batch, state, prompt, geminiResponse, errorMessage, nutritionistSelectionModel));
+            traces.add(selectionTrace(iteration, batch, state, prompt, geminiResponse, errorMessage, nvidiaModel));
             logIteration(sessionId, traces.get(traces.size() - 1));
             iteration++;
         }
@@ -318,7 +298,7 @@ public class NutritionistAgentService {
         List<RecipeBrief> briefs = buildRecipeBriefs(recipeById, candidates);
         if (briefs.isEmpty()) {
             System.err.println("Nutritionist final plan failed: no shortlisted recipe briefs were available.");
-            return new PlanAttempt(null, null, null, "No shortlisted recipe briefs were available.", nutritionistModel);
+            return new PlanAttempt(null, null, null, "No shortlisted recipe briefs were available.", nvidiaModel);
         }
 
         String prompt = null;
@@ -326,12 +306,12 @@ public class NutritionistAgentService {
         try {
             prompt = buildFinalPlanPrompt(profile, medicalManifest, performanceManifest, briefs);
             logPromptSize("PLAN_BUILD", 0, prompt);
-            geminiResponse = callGemini(prompt, nutritionistModel);
+            geminiResponse = callModel(prompt);
             NutritionPlan plan = hydrateAndCompute(parseRawPlan(geminiResponse), recipeById);
-            return new PlanAttempt(plan, prompt, geminiResponse, null, nutritionistModel);
+            return new PlanAttempt(plan, prompt, geminiResponse, null, nvidiaModel);
         } catch (Exception e) {
             System.err.println("Nutritionist final plan failed: " + e.getMessage());
-            return new PlanAttempt(null, prompt, geminiResponse, rootCauseMessage(e), nutritionistModel);
+            return new PlanAttempt(null, prompt, geminiResponse, rootCauseMessage(e), nvidiaModel);
         }
     }
 
@@ -346,7 +326,7 @@ public class NutritionistAgentService {
     ) {
         List<RecipeBrief> briefs = buildRecipeBriefs(recipeById, repairCandidates);
         if (briefs.isEmpty()) {
-            return new PlanAttempt(currentPlan, null, null, "No repair recipe briefs were available.", nutritionistRepairModel);
+            return new PlanAttempt(currentPlan, null, null, "No repair recipe briefs were available.", nvidiaModel);
         }
 
         String prompt = null;
@@ -361,12 +341,12 @@ public class NutritionistAgentService {
                     validationResult
             );
             logPromptSize("REPAIR", 0, prompt);
-            geminiResponse = callGemini(prompt, nutritionistRepairModel);
+            geminiResponse = callModel(prompt);
             NutritionPlan plan = hydrateAndCompute(parseRawPlan(geminiResponse), recipeById);
-            return new PlanAttempt(plan, prompt, geminiResponse, null, nutritionistRepairModel);
+            return new PlanAttempt(plan, prompt, geminiResponse, null, nvidiaModel);
         } catch (Exception e) {
             System.err.println("Nutritionist repair failed: " + e.getMessage());
-            return new PlanAttempt(null, prompt, geminiResponse, rootCauseMessage(e), nutritionistRepairModel);
+            return new PlanAttempt(null, prompt, geminiResponse, rootCauseMessage(e), nvidiaModel);
         }
     }
 
@@ -777,59 +757,8 @@ OUTPUT_SCHEMA:
         );
     }
 
-    private String callGemini(String prompt) {
-        return callGemini(prompt, nutritionistModel);
-    }
-
-    private String callGemini(String prompt, String model) {
-        int maxAttempts = Math.max(1, retry503Attempts + 1);
-        RuntimeException lastError = null;
-        String modelId = safeModel(model);
-
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                return callGeminiOnce(prompt, modelId);
-            } catch (WebClientResponseException e) {
-                lastError = e;
-                if (!isRetryableGeminiStatus(e) || attempt >= maxAttempts) break;
-
-                retryAfterDelay(
-                        "Gemini model " + modelId + " returned " + e.getStatusCode().value() + " " + e.getStatusText(),
-                        attempt,
-                        maxAttempts
-                );
-            } catch (WebClientRequestException e) {
-                lastError = e;
-                if (attempt >= maxAttempts) break;
-
-                retryAfterDelay("Gemini request failed before receiving a response: " + rootCauseMessage(e), attempt, maxAttempts);
-            }
-        }
-
-        throw lastError == null ? new RuntimeException("Gemini request failed") : lastError;
-    }
-
-    private void retryAfterDelay(String reason, int attempt, int maxAttempts) {
-        long delayMillis = retryDelayMillis(attempt);
-        System.err.printf(
-                "%s; retrying attempt %d/%d after %dms.%n",
-                reason,
-                attempt + 1,
-                maxAttempts,
-                delayMillis
-        );
-        sleepBeforeRetry(delayMillis);
-    }
-
-    private boolean isRetryableGeminiStatus(WebClientResponseException exception) {
-        int status = exception.getStatusCode().value();
-        return status == 429 || status >= 500;
-    }
-
-    private long retryDelayMillis(int attempt) {
-        long multiplier = 1L << Math.min(attempt - 1, 4);
-        long delay = retryBaseDelayMillis * multiplier;
-        return Math.min(delay, retryMaxDelayMillis);
+    private String callModel(String prompt) {
+        return nvidiaChatClient.complete(prompt, nvidiaModel);
     }
 
     private String rootCauseMessage(Throwable throwable) {
@@ -839,47 +768,6 @@ OUTPUT_SCHEMA:
         }
         String message = current.getMessage();
         return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
-    }
-
-    private String callGeminiOnce(String prompt, String model) {
-        Map<String, Object> body = Map.of(
-                "contents", new Object[]{
-                        Map.of("parts", new Object[]{Map.of("text", prompt)})
-                },
-                "generationConfig", Map.of(
-                        "responseMimeType", "application/json"
-                )
-        );
-
-        String raw = webClient.post()
-                .uri("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + apiKey)
-                .bodyValue(body)
-                .retrieve()
-                .bodyToMono(String.class)
-                .block();
-
-        try {
-            JsonNode node = mapper.readTree(raw);
-            return node.get("candidates")
-                    .get(0)
-                    .get("content")
-                    .get("parts")
-                    .get(0)
-                    .get("text")
-                    .asText()
-                    .trim();
-        } catch (Exception e) {
-            throw new RuntimeException("Nutritionist agent response parse failed", e);
-        }
-    }
-
-    private void sleepBeforeRetry(long delayMillis) {
-        try {
-            Thread.sleep(delayMillis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while waiting to retry Gemini request", e);
-        }
     }
 
     private NutritionistSelectionState parseSelectionState(String jsonText) throws Exception {
@@ -1316,12 +1204,6 @@ OUTPUT_SCHEMA:
                 iteration,
                 prompt == null ? 0 : prompt.length()
         );
-    }
-
-    private String safeModel(String model) {
-        return model == null || model.isBlank()
-                ? "gemini-3-flash-preview"
-                : model.trim();
     }
 
     private String extractJsonPayload(String text) {

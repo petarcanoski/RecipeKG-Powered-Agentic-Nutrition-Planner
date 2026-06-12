@@ -6,10 +6,9 @@ import com.recipekg.planner.model.User;
 import com.recipekg.planner.model.WeeklyPlan;
 import com.recipekg.planner.repository.UserRepository;
 import com.recipekg.planner.repository.WeeklyPlanRepository;
+import com.recipekg.planner.service.ai.NvidiaChatClient;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
@@ -21,10 +20,7 @@ public class PlanAdaptationService {
 
     private final WeeklyPlanRepository planRepository;
     private final UserRepository userRepository;
-    private final WebClient webClient;
-
-    @Value("${gemini.api-key}")
-    private String apiKey;
+    private final NvidiaChatClient nvidiaChatClient;
 
     public WeeklyPlan adaptCurrentWeek(Long userId, String event) {
 
@@ -85,36 +81,8 @@ Return only:
 ]
 """.formatted(event);
 
-            Map<String, Object> body =
-                    Map.of(
-                            "contents", new Object[]{
-                                    Map.of(
-                                            "parts", new Object[]{
-                                                    Map.of("text", prompt)
-                                            }
-                                    )
-                            }
-                    );
-
-            String raw =
-                    webClient.post()
-                            .uri("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey)
-                            .bodyValue(body)
-                            .retrieve()
-                            .bodyToMono(String.class)
-                            .block();
-
-            JsonNode ai =
-                    mapper.readTree(raw)
-                            .get("candidates")
-                            .get(0)
-                            .get("content")
-                            .get("parts")
-                            .get(0)
-                            .get("text");
-
             JsonNode newRemaining =
-                    mapper.readTree(ai.asText());
+                    mapper.readTree(extractJsonPayload(nvidiaChatClient.complete(prompt)));
 
             List<JsonNode> merged =
                     new ArrayList<>(completed);
@@ -133,5 +101,41 @@ Return only:
         } catch (Exception e) {
             throw new RuntimeException("Adaptation failed", e);
         }
+    }
+
+    private String stripCodeFence(String text) {
+        if (text == null) return "";
+        String trimmed = text.trim();
+        if (trimmed.startsWith("```")) {
+            trimmed = trimmed.replaceFirst("^```(?:json)?", "").trim();
+            trimmed = trimmed.replaceFirst("```$", "").trim();
+        }
+        return trimmed;
+    }
+
+    private String extractJsonPayload(String text) {
+        String trimmed = stripCodeFence(text);
+        if (trimmed.isBlank()) return trimmed;
+
+        int objectStart = trimmed.indexOf('{');
+        int arrayStart = trimmed.indexOf('[');
+        int start;
+
+        if (objectStart < 0) {
+            start = arrayStart;
+        } else if (arrayStart < 0) {
+            start = objectStart;
+        } else {
+            start = Math.min(objectStart, arrayStart);
+        }
+
+        if (start < 0) return trimmed;
+
+        char opener = trimmed.charAt(start);
+        char closer = opener == '[' ? ']' : '}';
+        int end = trimmed.lastIndexOf(closer);
+        if (end <= start) return trimmed.substring(start).trim();
+
+        return trimmed.substring(start, end + 1).trim();
     }
 }

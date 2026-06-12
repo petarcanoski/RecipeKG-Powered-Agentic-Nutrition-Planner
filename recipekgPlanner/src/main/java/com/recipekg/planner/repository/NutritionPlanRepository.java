@@ -9,7 +9,7 @@ public interface NutritionPlanRepository extends JpaRepository<NutritionPlanEnti
 
     Optional<NutritionPlanEntity> findTopByUserIdAndWeekNumberOrderByUpdatedAtDesc(Long userId, Integer weekNumber);
 
-    Optional<NutritionPlanEntity> findByUserIdAndWeekNumberAndGeneratedBy(Long userId, Integer weekNumber, String generatedBy);
+    Optional<NutritionPlanEntity> findTopByUserIdAndWeekNumberAndGeneratedByOrderByUpdatedAtDesc(Long userId, Integer weekNumber, String generatedBy);
 
     Optional<NutritionPlanEntity> findTopByUserIdOrderByWeekNumberDescUpdatedAtDesc(Long userId);
 

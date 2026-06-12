@@ -7,40 +7,24 @@ import com.recipekg.planner.model.NutrientTarget;
 import com.recipekg.planner.model.PerformanceManifest;
 import com.recipekg.planner.model.UserProfile;
 import com.recipekg.planner.service.MacroCalculatorService;
+import com.recipekg.planner.service.ai.NvidiaChatClient;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
-import org.springframework.web.reactive.function.client.WebClientRequestException;
-import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.util.List;
-import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
 public class PerformanceAgentService {
 
-    private final WebClient webClient;
+    private final NvidiaChatClient nvidiaChatClient;
     private final MacroCalculatorService macroCalculatorService;
     private final ObjectMapper mapper = new ObjectMapper();
-
-    @Value("${gemini.api-key}")
-    private String apiKey;
-
-    @Value("${gemini.retry-503-attempts:5}")
-    private int retry503Attempts;
-
-    @Value("${gemini.retry-base-delay-ms:10000}")
-    private long retryBaseDelayMillis;
-
-    @Value("${gemini.retry-max-delay-ms:90000}")
-    private long retryMaxDelayMillis;
 
     public PerformanceManifest generatePerformanceManifest(UserProfile profile, MedicalManifest medicalManifest) {
         try {
             String prompt = buildPrompt(profile, medicalManifest);
-            String text = callGemini(prompt);
+            String text = callModel(prompt);
             PerformanceManifest manifest = parsePerformanceManifest(text);
             if (isUsable(manifest)) {
                 return manifest;
@@ -109,119 +93,43 @@ MEDICAL MANIFEST:
         );
     }
 
-    private String callGemini(String prompt) {
-        Map<String, Object> body =
-                Map.of(
-                        "contents", new Object[]{
-                                Map.of(
-                                        "parts", new Object[]{
-                                                Map.of("text", prompt)
-                                        }
-                                )
-                        }
-                );
-
-        String raw = callGeminiRaw(body);
-
-        try {
-            JsonNode node = mapper.readTree(raw);
-            return node.get("candidates")
-                    .get(0)
-                    .get("content")
-                    .get("parts")
-                    .get(0)
-                    .get("text")
-                    .asText()
-                    .trim();
-        } catch (Exception e) {
-            throw new RuntimeException("Performance agent response parse failed", e);
-        }
-    }
-
-    private String callGeminiRaw(Map<String, Object> body) {
-        int maxAttempts = Math.max(1, retry503Attempts + 1);
-        RuntimeException lastError = null;
-
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                return callGeminiOnce(body);
-            } catch (WebClientResponseException e) {
-                lastError = e;
-                if (!isRetryableGeminiStatus(e) || attempt >= maxAttempts) break;
-
-                retryAfterDelay(
-                        "Performance agent Gemini call returned " + e.getStatusCode().value() + " " + e.getStatusText(),
-                        attempt,
-                        maxAttempts
-                );
-            } catch (WebClientRequestException e) {
-                lastError = e;
-                if (attempt >= maxAttempts) break;
-
-                retryAfterDelay("Performance agent Gemini request failed before receiving a response: " + rootCauseMessage(e), attempt, maxAttempts);
-            }
-        }
-
-        throw lastError == null ? new RuntimeException("Performance agent Gemini request failed") : lastError;
-    }
-
-    private String callGeminiOnce(Map<String, Object> body) {
-        return webClient.post()
-                .uri("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey)
-                .bodyValue(body)
-                .retrieve()
-                .bodyToMono(String.class)
-                .block();
-    }
-
-    private void retryAfterDelay(String reason, int attempt, int maxAttempts) {
-        long delayMillis = retryDelayMillis(attempt);
-        System.err.printf(
-                "%s; retrying attempt %d/%d after %dms.%n",
-                reason,
-                attempt + 1,
-                maxAttempts,
-                delayMillis
-        );
-        sleepBeforeRetry(delayMillis);
-    }
-
-    private boolean isRetryableGeminiStatus(WebClientResponseException exception) {
-        int status = exception.getStatusCode().value();
-        return status == 429 || status >= 500;
-    }
-
-    private long retryDelayMillis(int attempt) {
-        long multiplier = 1L << Math.min(attempt - 1, 4);
-        long delay = retryBaseDelayMillis * multiplier;
-        return Math.min(delay, retryMaxDelayMillis);
-    }
-
-    private String rootCauseMessage(Throwable throwable) {
-        Throwable current = throwable;
-        while (current.getCause() != null) {
-            current = current.getCause();
-        }
-        String message = current.getMessage();
-        return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
-    }
-
-    private void sleepBeforeRetry(long delayMillis) {
-        try {
-            Thread.sleep(delayMillis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while waiting to retry Performance agent Gemini request", e);
-        }
+    private String callModel(String prompt) {
+        return nvidiaChatClient.complete(prompt);
     }
 
     private PerformanceManifest parsePerformanceManifest(String jsonText) throws Exception {
-        String trimmed = stripCodeFence(jsonText);
+        String trimmed = extractJsonPayload(jsonText);
         JsonNode node = mapper.readTree(trimmed);
         if (node.isArray() && !node.isEmpty()) {
             node = node.get(0);
         }
         return mapper.treeToValue(node, PerformanceManifest.class);
+    }
+
+    private String extractJsonPayload(String text) {
+        String trimmed = stripCodeFence(text);
+        if (trimmed.isBlank()) return trimmed;
+
+        int objectStart = trimmed.indexOf('{');
+        int arrayStart = trimmed.indexOf('[');
+        int start;
+
+        if (objectStart < 0) {
+            start = arrayStart;
+        } else if (arrayStart < 0) {
+            start = objectStart;
+        } else {
+            start = Math.min(objectStart, arrayStart);
+        }
+
+        if (start < 0) return trimmed;
+
+        char opener = trimmed.charAt(start);
+        char closer = opener == '[' ? ']' : '}';
+        int end = trimmed.lastIndexOf(closer);
+        if (end <= start) return trimmed.substring(start).trim();
+
+        return trimmed.substring(start, end + 1).trim();
     }
 
     private String stripCodeFence(String text) {

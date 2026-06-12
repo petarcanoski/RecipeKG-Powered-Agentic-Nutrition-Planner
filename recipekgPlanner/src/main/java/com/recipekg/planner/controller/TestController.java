@@ -15,22 +15,18 @@ import com.recipekg.planner.response.PantryResponse;
 import com.recipekg.planner.service.FoodScientistService;
 import com.recipekg.planner.service.NutritionPlanPersistenceService;
 import com.recipekg.planner.service.NutritionPlanResponseMapper;
+import com.recipekg.planner.service.ai.NvidiaChatClient;
 import com.recipekg.planner.service.agents.AgentOrchestratorService;
 import com.recipekg.planner.service.agents.MedicalAgentService;
 import com.recipekg.planner.service.agents.ProgressAgentService;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDate;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 @RestController
@@ -43,9 +39,10 @@ public class TestController {
     private final ProgressAgentService progressAgentService;
     private final NutritionPlanResponseMapper nutritionPlanResponseMapper;
     private final NutritionPlanPersistenceService nutritionPlanPersistenceService;
+    private final NvidiaChatClient nvidiaChatClient;
 
 
-    public TestController(MedicalAgentService medicalAgentService, UserProfileRepository userProfileRepository, FoodScientistService foodScientistService, AgentOrchestratorService agentOrchestratorService, ProgressAgentService progressAgentService, NutritionPlanResponseMapper nutritionPlanResponseMapper, NutritionPlanPersistenceService nutritionPlanPersistenceService) {
+    public TestController(MedicalAgentService medicalAgentService, UserProfileRepository userProfileRepository, FoodScientistService foodScientistService, AgentOrchestratorService agentOrchestratorService, ProgressAgentService progressAgentService, NutritionPlanResponseMapper nutritionPlanResponseMapper, NutritionPlanPersistenceService nutritionPlanPersistenceService, NvidiaChatClient nvidiaChatClient) {
         this.medicalAgentService = medicalAgentService;
         this.userProfileRepository = userProfileRepository;
         this.foodScientistService = foodScientistService;
@@ -53,50 +50,14 @@ public class TestController {
         this.progressAgentService = progressAgentService;
         this.nutritionPlanResponseMapper = nutritionPlanResponseMapper;
         this.nutritionPlanPersistenceService = nutritionPlanPersistenceService;
+        this.nvidiaChatClient = nvidiaChatClient;
     }
 
-    @Value("${gemini.api-key}")
-    private String apiKey;
-
-    @GetMapping("/test-gemini")
+    @GetMapping({"/test-gemini", "/test-nvidia"})
     @ResponseBody
-    public String testGemini() {
-
-        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey;
-
-        RestTemplate restTemplate = new RestTemplate();
-
-        Map<String, Object> part = new HashMap<>();
-        part.put("text", "Explain recursion in one sentence");
-
-        Map<String, Object> content = new HashMap<>();
-        content.put("parts", List.of(part));
-
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("contents", List.of(content));
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-
-        HttpEntity<Map<String, Object>> request =
-                new HttpEntity<>(requestBody, headers);
-
+    public String testNvidia() {
         try {
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url,
-                    HttpMethod.POST,
-                    request,
-                    Map.class
-            );
-
-            List candidates = (List) response.getBody().get("candidates");
-            Map firstCandidate = (Map) candidates.get(0);
-            Map contentMap = (Map) firstCandidate.get("content");
-            List parts = (List) contentMap.get("parts");
-            Map textPart = (Map) parts.get(0);
-
-            return (String) textPart.get("text");
-
+            return nvidiaChatClient.complete("Explain recursion in one sentence");
         } catch (Exception e) {
             return "Error: " + e.getMessage();
         }
@@ -138,7 +99,7 @@ public class TestController {
     }
 
     @GetMapping("/test-breakfast-recipes/{id}")
-    public PantryResponse testBreakfastRecipes(
+    public List<String> testBreakfastRecipes(
             @PathVariable Long id,
             @RequestParam(defaultValue = "false") boolean useMedical
     ) {
@@ -149,7 +110,13 @@ public class TestController {
                 ? medicalAgentService.generateMedicalAdvice(userProfile)
                 : null;
 
-        return foodScientistService.fetchBreakfastCandidates(userProfile, manifest);
+        PantryResponse response = foodScientistService.fetchBreakfastCandidates(userProfile, manifest);
+        return response.getRecipes() == null
+                ? List.of()
+                : response.getRecipes().stream()
+                .map(RecipeCandidate::getLabel)
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     private FrontendNutritionPlanResponse hardcodedNutritionPlan() {

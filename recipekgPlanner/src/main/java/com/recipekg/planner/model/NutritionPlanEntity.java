@@ -12,7 +12,6 @@ import jakarta.persistence.OneToMany;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
-import jakarta.persistence.UniqueConstraint;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -26,13 +25,7 @@ import java.util.List;
 @Getter
 @Setter
 @NoArgsConstructor
-@Table(
-        name = "nutrition_plan",
-        uniqueConstraints = @UniqueConstraint(
-                name = "uq_nutrition_plan_user_week_generated_by",
-                columnNames = {"user_id", "week_number", "generated_by"}
-        )
-)
+@Table(name = "nutrition_plan")
 public class NutritionPlanEntity {
 
     @Id

@@ -31,7 +31,7 @@ public class NutritionPlanPersistenceService {
     public static final String RECIPE_KG_AGENT = "RECIPE_KG_AGENT";
     public static final String DIRECT_GEMINI = "DIRECT_GEMINI";
     public static final String TEST_MOCK = "TEST_MOCK";
-    private static final String NUTRITIONIST_MODEL = "gemini-3-flash-preview";
+    private static final String NUTRITIONIST_MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5";
 
     private final NutritionPlanRepository nutritionPlanRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -67,12 +67,6 @@ public class NutritionPlanPersistenceService {
             NutritionPlan sourcePlan
     ) {
         String source = normalizeGeneratedBy(generatedBy);
-        nutritionPlanRepository.findByUserIdAndWeekNumberAndGeneratedBy(user.getId(), weekNumber, source)
-                .ifPresent(existingPlan -> {
-                    nutritionPlanRepository.delete(existingPlan);
-                    nutritionPlanRepository.flush();
-                });
-
         NutritionPlanEntity plan = new NutritionPlanEntity();
 
         plan.setUser(user);
@@ -106,7 +100,7 @@ public class NutritionPlanPersistenceService {
 
     @Transactional(readOnly = true)
     public Optional<FrontendNutritionPlanResponse> findByUserWeekAndGeneratedBy(Long userId, int weekNumber, String generatedBy) {
-        return nutritionPlanRepository.findByUserIdAndWeekNumberAndGeneratedBy(userId, weekNumber, normalizeGeneratedBy(generatedBy))
+        return nutritionPlanRepository.findTopByUserIdAndWeekNumberAndGeneratedByOrderByUpdatedAtDesc(userId, weekNumber, normalizeGeneratedBy(generatedBy))
                 .map(this::toFrontendResponse);
     }
 
