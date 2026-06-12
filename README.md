@@ -1,4 +1,4 @@
-# RecipeKG ✨
+# RecipeKG
 
 > **Long story, short:** RecipeKG is a food-knowledge workspace that turns scattered recipe and nutrition data into something you can actually use — a searchable knowledge graph, a guided integration dashboard, and a planning flow that feels like a real product instead of a pile of APIs.
 
