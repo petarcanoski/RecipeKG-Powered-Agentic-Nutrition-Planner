@@ -15,8 +15,8 @@
 
 RecipeKG is made of two connected parts:
 
-- **`RecipeKG Extension Platform/`** — the frontend experience, built with React, Vite, and a polished component system.
-- **`recipekgPlanner/`** — the backend engine, built with Spring Boot, PostgreSQL, Flyway, and security controls.
+- **`RecipeKG Extension Platform/`** — the frontend experience
+- **`recipekgPlanner/`** — the backend engine
 
 Together, they power a food-data application where users can:
 
@@ -26,15 +26,6 @@ Together, they power a food-data application where users can:
 - view the knowledge graph,
 - and move through a planning workflow that turns data into action.
 
----
-
-## The short version
-
-If you want the elevator pitch:
-
-> **RecipeKG helps you organize recipe and nutrition data, connect multiple food sources, and explore the relationships behind them — all inside a clean, modern web app.**
-
-It’s part data platform, part assistant, part planning tool.
 
 ---
 
@@ -54,7 +45,6 @@ RecipeKG brings those pieces together into a single experience so you can:
 - inspect the graph behind the data,
 - and use the app as a practical planning workspace.
 
-Think of it as a bridge between **raw food data** and **useful decisions**.
 
 ---
 
@@ -136,11 +126,7 @@ Think of it as a bridge between **raw food data** and **useful decisions**.
 - Google GenAI dependency
 
 
----
 
-## In one sentence
-
-**RecipeKG is a modern, connected food-data platform that makes recipe knowledge discoverable, usable, and beautifully organized.**
 
 ---
 
