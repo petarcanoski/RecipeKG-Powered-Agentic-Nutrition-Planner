@@ -2,12 +2,7 @@
 
 > **Long story, short:** RecipeKG is a food-knowledge workspace that turns scattered recipe and nutrition data into something you can actually use — a searchable knowledge graph, a guided integration dashboard, and a planning flow that feels like a real product instead of a pile of APIs.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/frontend-React%20%2B%20Vite-61dafb?style=for-the-badge&logo=react&logoColor=black" alt="Frontend" />
-  <img src="https://img.shields.io/badge/backend-Spring%20Boot-6db33f?style=for-the-badge&logo=springboot&logoColor=white" alt="Backend" />
-  <img src="https://img.shields.io/badge/database-PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white" alt="Database" />
-  <img src="https://img.shields.io/badge/auth-connected-111827?style=for-the-badge&logo=shield&logoColor=white" alt="Auth" />
-</p>
+
 
 ---
 
@@ -129,8 +124,4 @@ RecipeKG brings those pieces together into a single experience so you can:
 
 
 ---
-
-<p align="center">
-  Built with care for the long story behind food data — and the short version that gets things done.
-</p>
 
