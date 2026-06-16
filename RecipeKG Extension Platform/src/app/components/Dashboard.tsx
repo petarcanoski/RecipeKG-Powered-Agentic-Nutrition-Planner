@@ -250,23 +250,23 @@ function PromptPanel({
   const isLoading = state.status === "loading";
 
   return (
-    <Card className="flex min-h-[330px] flex-col">
-      <CardHeader className="border-b pb-4">
+    <Card className="flex min-h-[330px] flex-col shadow-sm hover:shadow-md transition-shadow">
+      <CardHeader className="border-b bg-gradient-to-r from-blue-50 to-indigo-50">
         <div className="flex items-start gap-3">
           <div>
-            <CardTitle className="text-lg">{title}</CardTitle>
-            <CardDescription>{description}</CardDescription>
+            <CardTitle className="text-lg font-semibold">{title}</CardTitle>
+            <CardDescription className="text-sm">{description}</CardDescription>
           </div>
         </div>
       </CardHeader>
 
-      <CardContent className="flex flex-1 flex-col gap-4 p-5">
-        <div className="flex-1 rounded-md border bg-gray-50 p-4 text-sm leading-6 text-gray-700">
+      <CardContent className="flex flex-1 flex-col gap-4 p-6">
+        <div className="flex-1 rounded-lg border border-gray-200 bg-white p-5 text-sm leading-6 text-gray-700 shadow-xs">
           {body}
         </div>
 
         {state.message && (
-          <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+          <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 font-medium shadow-xs">
             {state.message}
           </div>
         )}
@@ -274,7 +274,7 @@ function PromptPanel({
         <Button
           onClick={onSend}
           disabled={isLoading}
-          className="ml-auto w-full sm:w-auto"
+          className="ml-auto w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-sm hover:shadow-md transition-all"
         >
           {isLoading ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -301,13 +301,13 @@ function MacroGrid({ macros }: { macros: MacroSummary }) {
   ];
 
   return (
-    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
       {values.map((item) => (
-        <div key={item.label} className="rounded-md border bg-white px-3 py-2">
-          <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+        <div key={item.label} className="rounded-lg border border-gray-200 bg-gradient-to-br from-white to-gray-50 px-4 py-3 shadow-xs hover:shadow-sm transition-shadow">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">
             {item.label}
           </p>
-          <p className="mt-1 text-sm font-semibold text-gray-900">
+          <p className="mt-2 text-base font-bold text-gray-900">
             {item.value}
           </p>
         </div>
@@ -326,8 +326,8 @@ function GeneratedPlan({
   const [openDay, setOpenDay] = useState<number>(plan.days[0]?.day ?? 1);
 
   return (
-    <div className="overflow-hidden rounded-md border bg-white">
-      <div className="border-b bg-gray-50 p-4">
+    <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+      <div className="border-b bg-gradient-to-r from-blue-50 to-indigo-50 px-6 py-5">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="flex items-center gap-2">
@@ -336,17 +336,17 @@ function GeneratedPlan({
                 {title}
               </h3>
             </div>
-            <p className="mt-1 text-sm text-gray-600">{plan.summary}</p>
+            <p className="mt-2 text-sm text-gray-600">{plan.summary}</p>
           </div>
-          <div className="rounded-md border bg-gray-50 px-3 py-2 text-sm font-medium text-gray-700">
+          <div className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-xs">
             Status: {plan.goalStatus}
           </div>
         </div>
       </div>
 
-      <div className="space-y-5 p-4">
-        <div className="space-y-2">
-          <h3 className="text-sm font-semibold text-gray-900">Weekly totals</h3>
+      <div className="space-y-6 p-6">
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Weekly totals</h3>
           <MacroGrid macros={plan.weeklyTotals} />
         </div>
 
@@ -357,75 +357,79 @@ function GeneratedPlan({
             return (
               <div
                 key={day.day}
-                className="overflow-hidden rounded-md border bg-white"
+                className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xs hover:shadow-sm transition-shadow"
               >
                 <button
                   type="button"
                   onClick={() => setOpenDay(isOpen ? 0 : day.day)}
-                  className="flex w-full items-center justify-between gap-3 border-b bg-gray-50 px-4 py-3 text-left"
+                  className="flex w-full items-center justify-between gap-3 border-b bg-gradient-to-r from-gray-50 to-transparent px-5 py-4 text-left hover:bg-gray-50 transition-colors"
                 >
                   <div>
                     <p className="font-semibold text-gray-900">Day {day.day}</p>
-                    <p className="text-sm text-gray-600">{day.rationale}</p>
+                    <p className="text-sm text-gray-600 mt-1">{day.rationale}</p>
                   </div>
                   <ChevronDown
-                    className={`h-4 w-4 shrink-0 text-gray-500 transition-transform ${
-                      isOpen ? "rotate-180" : ""
-                    }`}
+                    className={`h-5 w-5 shrink-0 text-gray-500 transition-transform`}
+                    style={{
+                      transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+                    }}
                   />
                 </button>
 
                 {isOpen && (
-                  <div className="space-y-4 p-4">
+                  <div className="space-y-5 p-6 bg-gradient-to-b from-white to-gray-50">
                     <MacroGrid macros={day.totalMacros} />
 
                     <div className="grid gap-4">
                       {day.meals.map((meal) => (
                         <div
                           key={`${day.day}-${meal.slot}`}
-                          className="rounded-md border bg-gray-50 p-4"
+                          className="rounded-lg border border-gray-200 bg-white p-5 shadow-xs hover:shadow-sm transition-shadow"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">
                                 {meal.slot}
                               </p>
-                              <h4 className="mt-1 font-semibold text-gray-900">
+                              <h4 className="mt-2 font-semibold text-gray-900">
                                 {meal.recipeName}
                               </h4>
                             </div>
-                            <span className="rounded-md border bg-white px-2 py-1 text-xs font-medium text-gray-700">
+                            <span className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 whitespace-nowrap">
                               {meal.servings} serving
                             </span>
                           </div>
 
-                          <p className="mt-3 text-sm text-gray-600">
+                          <p className="mt-3 text-sm text-gray-600 leading-relaxed">
                             {meal.reason}
                           </p>
 
                           <div className="mt-4">
-                            <p className="text-sm font-medium text-gray-900">
+                            <p className="text-sm font-semibold text-gray-900 mb-2">
                               Ingredients
                             </p>
-                            <ul className="mt-2 space-y-1 text-sm text-gray-600">
+                            <ul className="space-y-1 text-sm text-gray-600">
                               {meal.ingredients.map((ingredient) => (
-                                <li key={ingredient}>{ingredient}</li>
+                                <li key={ingredient} className="flex items-start gap-2">
+                                  <span className="text-blue-600 mt-1">•</span>
+                                  <span>{ingredient}</span>
+                                </li>
                               ))}
                             </ul>
                           </div>
 
-                          <div className="mt-4 grid grid-cols-2 gap-2 text-sm">
-                            <div className="rounded-md bg-white px-2 py-1">
+                          <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                            <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 font-medium text-gray-900 shadow-xs">
                               {meal.totalMacros.calories} kcal
                             </div>
-                            <div className="rounded-md bg-white px-2 py-1">
-                              {meal.totalMacros.protein} g protein
+                            <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 font-medium text-gray-900 shadow-xs">
+                              {meal.totalMacros.protein}g protein
                             </div>
-                            <div className="rounded-md bg-white px-2 py-1">
-                              {meal.totalMacros.carbs} g carbs
+                            <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 font-medium text-gray-900 shadow-xs">
+                              {meal.totalMacros.carbs}g carbs
                             </div>
-                            <div className="rounded-md bg-white px-2 py-1">
-                              {meal.totalMacros.fat} g fat
+                            <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 font-medium text-gray-900 shadow-xs">
+                              {meal.totalMacros.fat}g fat
                             </div>
                           </div>
                         </div>
@@ -450,17 +454,17 @@ function PlanLoading({
   message: string;
 }) {
   return (
-    <div className="flex flex-col items-center gap-4 rounded-md border bg-blue-50 p-6 text-center">
-      <div className="relative flex h-16 w-16 items-center justify-center rounded-full border bg-white">
-        <div className="absolute h-16 w-16 animate-ping rounded-full bg-blue-100" />
+    <div className="flex flex-col items-center gap-4 rounded-lg border border-blue-200 bg-gradient-to-br from-blue-50 to-indigo-50 p-8 text-center shadow-sm">
+      <div className="relative flex h-16 w-16 items-center justify-center rounded-full border-2 border-blue-200 bg-white shadow-md">
+        <div className="absolute h-16 w-16 animate-pulse rounded-full bg-blue-200" />
         <Loader2 className="relative h-7 w-7 animate-spin text-blue-600" />
       </div>
-      <div className="space-y-1 transition-all duration-300">
+      <div className="space-y-2 transition-all duration-300">
         <p className="text-lg font-semibold text-gray-900">
           {title}
         </p>
-        <p className="text-sm text-gray-600">{message}</p>
-        <p className="text-sm font-medium text-gray-700">
+        <p className="text-sm text-gray-700 leading-relaxed">{message}</p>
+        <p className="text-xs font-medium text-gray-600 mt-3">
           This can take up to 20 minutes.
         </p>
       </div>
@@ -474,9 +478,9 @@ function GeminiPlaceholderResult({ message }: { message: string }) {
   }
 
   return (
-    <div className="rounded-md border bg-gray-50 p-4">
+    <div className="rounded-lg border border-gray-200 bg-gradient-to-br from-white to-gray-50 p-5 shadow-xs">
       <p className="text-sm font-semibold text-gray-900">Gemini result</p>
-      <p className="mt-1 text-sm text-gray-600">{message}</p>
+      <p className="mt-2 text-sm text-gray-600 leading-relaxed">{message}</p>
     </div>
   );
 }
@@ -507,36 +511,36 @@ function PlanComparisonVotePanel({
   ];
 
   return (
-    <Card>
-      <CardHeader className="border-b">
-        <div className="flex items-center gap-2">
-          <Trophy className="h-5 w-5 text-blue-600" />
+    <Card className="shadow-sm">
+      <CardHeader className="border-b bg-gradient-to-r from-amber-50 to-orange-50">
+        <div className="flex items-center gap-3">
+          <Trophy className="h-5 w-5 text-amber-600" />
           <div>
-            <CardTitle className="text-lg">Vote on the better plan</CardTitle>
-            <CardDescription>
+            <CardTitle className="text-lg font-semibold">Vote on the better plan</CardTitle>
+            <CardDescription className="text-sm">
               Choose the plan that looks more useful, realistic, and safe for the user profile.
             </CardDescription>
           </div>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4 p-5">
+      <CardContent className="space-y-5 p-6">
         {score && (
           <div className="grid gap-3 sm:grid-cols-4">
-            <div className="rounded-md border bg-gray-50 px-3 py-2">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">RecipeKG</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{score.recipeKgWins}</p>
+            <div className="rounded-lg border border-gray-200 bg-gradient-to-br from-white to-gray-50 px-4 py-3 shadow-xs">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">RecipeKG</p>
+              <p className="mt-2 text-lg font-bold text-gray-900">{score.recipeKgWins}</p>
             </div>
-            <div className="rounded-md border bg-gray-50 px-3 py-2">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Gemini</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{score.geminiWins}</p>
+            <div className="rounded-lg border border-gray-200 bg-gradient-to-br from-white to-gray-50 px-4 py-3 shadow-xs">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Gemini</p>
+              <p className="mt-2 text-lg font-bold text-gray-900">{score.geminiWins}</p>
             </div>
-            <div className="rounded-md border bg-gray-50 px-3 py-2">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Ties</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{score.ties}</p>
+            <div className="rounded-lg border border-gray-200 bg-gradient-to-br from-white to-gray-50 px-4 py-3 shadow-xs">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Ties</p>
+              <p className="mt-2 text-lg font-bold text-gray-900">{score.ties}</p>
             </div>
-            <div className="rounded-md border bg-gray-50 px-3 py-2">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Total</p>
-              <p className="mt-1 text-lg font-semibold text-gray-900">{score.totalVotes}</p>
+            <div className="rounded-lg border border-gray-200 bg-gradient-to-br from-white to-gray-50 px-4 py-3 shadow-xs">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Total</p>
+              <p className="mt-2 text-lg font-bold text-gray-900">{score.totalVotes}</p>
             </div>
           </div>
         )}
@@ -548,6 +552,7 @@ function PlanComparisonVotePanel({
               type="button"
               variant={selectedWinner === option.value ? "default" : "outline"}
               onClick={() => onSelectWinner(option.value)}
+              className={selectedWinner === option.value ? "bg-blue-600 hover:bg-blue-700 shadow-sm" : ""}
             >
               {option.label}
             </Button>
@@ -558,16 +563,20 @@ function PlanComparisonVotePanel({
           value={reason}
           onChange={(event) => onReasonChange(event.target.value)}
           placeholder="Optional reason for your vote"
-          className="min-h-[90px]"
+          className="min-h-[100px] rounded-lg border-gray-200 shadow-xs"
         />
 
         {message && (
-          <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+          <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 font-medium shadow-xs">
             {message}
           </div>
         )}
 
-        <Button onClick={onSubmit} disabled={isSubmitting || !selectedWinner}>
+        <Button 
+          onClick={onSubmit} 
+          disabled={isSubmitting || !selectedWinner}
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-sm hover:shadow-md transition-all"
+        >
           {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trophy className="h-4 w-4" />}
           Submit vote
         </Button>
@@ -994,22 +1003,22 @@ export function Dashboard() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      <Card className="mx-auto w-full max-w-xl">
-        <CardHeader className="border-b pb-4">
+    <div className="mx-auto max-w-6xl space-y-8 py-2">
+      <Card className="shadow-sm hover:shadow-md transition-shadow">
+        <CardHeader className="border-b bg-gradient-to-r from-blue-50 to-indigo-50">
           <div className="flex items-center gap-3">
-            <div className="rounded-md border bg-white p-2 text-gray-700">
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-600 shadow-sm">
               <UserRound className="h-5 w-5" />
             </div>
             <div className="min-w-0 flex-1">
-              <CardTitle className="text-lg">User parameters</CardTitle>
-              <CardDescription>
+              <CardTitle className="text-lg font-semibold">User parameters</CardTitle>
+              <CardDescription className="text-sm">
                 {isProfileLoading
                   ? "Loading profile values from registration"
                   : "Profile values from registration"}
               </CardDescription>
             </div>
-            <Button asChild variant="outline" size="sm" className="shrink-0">
+            <Button asChild variant="outline" size="sm" className="shrink-0 shadow-sm hover:shadow-md transition-all">
               <Link to="/profile">
                 <Settings className="h-4 w-4" />
                 Edit profile
@@ -1017,18 +1026,18 @@ export function Dashboard() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-3 p-5 sm:grid-cols-2">
+        <CardContent className="grid gap-3 p-6 sm:grid-cols-2">
           {profileParameters.map((parameter) => (
             <div
               key={parameter.label}
-              className={`rounded-md border bg-gray-50 px-3 py-2 ${
+              className={`rounded-lg border border-gray-200 bg-gradient-to-br from-white to-gray-50 px-4 py-3 shadow-xs hover:shadow-sm transition-shadow ${
                 parameter.wide ? "sm:col-span-2" : ""
               }`}
             >
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">
                 {parameter.label}
               </p>
-              <p className="mt-1 break-words text-sm font-semibold text-gray-900">
+              <p className="mt-2 break-words text-sm font-semibold text-gray-900">
                 {parameter.value}
               </p>
             </div>
