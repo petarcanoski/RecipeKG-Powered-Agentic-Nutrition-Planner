@@ -43,19 +43,21 @@ export function ProfilePage() {
   ];
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="mx-auto max-w-4xl space-y-8">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <UserRound className="h-6 w-6 text-blue-600" />
-            <h2 className="text-2xl font-semibold text-gray-900">Profile</h2>
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-gradient-to-br from-blue-50 to-indigo-50 p-2.5 border border-blue-200">
+              <UserRound className="h-6 w-6 text-blue-600" />
+            </div>
+            <h2 className="text-3xl font-bold text-gray-900">Profile</h2>
           </div>
-          <p className="mt-1 text-gray-600">
+          <p className="mt-2 text-gray-600">
             Review your registered parameters. Editing will be enabled later.
           </p>
         </div>
 
-        <Button asChild variant="outline">
+        <Button asChild variant="outline" className="shadow-sm hover:shadow-md transition-all">
           <Link to="/">
             <ArrowLeft className="h-4 w-4" />
             Back to dashboard
@@ -63,36 +65,37 @@ export function ProfilePage() {
         </Button>
       </div>
 
-      <Card>
-        <CardHeader className="border-b">
-          <CardTitle className="text-lg">User parameters</CardTitle>
-          <CardDescription>
+      <Card className="shadow-sm">
+        <CardHeader className="border-b bg-gradient-to-r from-blue-50 to-indigo-50">
+          <CardTitle className="text-lg font-semibold">User parameters</CardTitle>
+          <CardDescription className="text-sm">
             {isProfileLoading
               ? "Loading profile values"
               : "Current profile values from your account"}
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-5 p-5">
-          <div className="grid gap-4 sm:grid-cols-2">
+        <CardContent className="space-y-6 p-6">
+          <div className="grid gap-5 sm:grid-cols-2">
             {fields.map((field) => (
-              <label key={field.label} className="space-y-1">
-                <span className="text-sm font-medium text-gray-700">
+              <label key={field.label} className="space-y-2.5">
+                <span className="text-xs font-semibold uppercase tracking-wider text-gray-600">
                   {field.label}
                 </span>
                 <Input
                   value={isProfileLoading ? "Loading" : field.value}
                   disabled
                   readOnly
+                  className="bg-gray-50 border-gray-200 text-gray-700 shadow-xs"
                 />
               </label>
             ))}
           </div>
 
-          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 font-medium shadow-xs">
             Updating profile parameters is not implemented yet.
           </div>
 
-          <Button disabled className="w-full sm:w-auto">
+          <Button disabled className="w-full sm:w-auto bg-gray-400 shadow-sm">
             <Save className="h-4 w-4" />
             Save changes
           </Button>

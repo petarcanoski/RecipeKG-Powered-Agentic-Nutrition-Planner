@@ -68,18 +68,23 @@ export function DataSources() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-semibold text-gray-900">Data Sources</h2>
-          <p className="text-gray-600 mt-1">
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-gradient-to-br from-cyan-50 to-blue-50 p-2.5 border border-cyan-200">
+              <Database className="h-6 w-6 text-cyan-600" />
+            </div>
+            <h2 className="text-3xl font-bold text-gray-900">Data Sources</h2>
+          </div>
+          <p className="text-gray-600 mt-2">
             Manage and configure food data sources for RecipeKG integration
           </p>
         </div>
         <Dialog>
           <DialogTrigger asChild>
-            <Button className="gap-2">
+            <Button className="gap-2 bg-blue-600 hover:bg-blue-700 shadow-sm hover:shadow-md transition-all">
               <Plus className="h-4 w-4" />
               Add Data Source
             </Button>
@@ -152,59 +157,63 @@ export function DataSources() {
           placeholder="Search data sources..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="pl-10"
+          className="pl-10 shadow-xs border-gray-200"
         />
       </div>
 
       {/* Data Sources Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredSources.map((source) => (
-          <Card key={source.id} className="hover:shadow-md transition-shadow">
-            <CardHeader>
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2">
-                  <Database className="h-5 w-5 text-blue-600" />
-                  <CardTitle className="text-base">{source.name}</CardTitle>
+          <Card key={source.id} className="shadow-sm hover:shadow-md transition-all border-gray-200">
+            <CardHeader className="border-b bg-gradient-to-br from-white to-gray-50">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <div className="rounded-lg bg-blue-50 p-2 border border-blue-200 flex-shrink-0">
+                    <Database className="h-5 w-5 text-blue-600" />
+                  </div>
+                  <div className="min-w-0">
+                    <CardTitle className="text-base font-semibold truncate">{source.name}</CardTitle>
+                    <CardDescription className="text-xs mt-1">{source.type}</CardDescription>
+                  </div>
                 </div>
                 {getStatusIcon(source.status)}
               </div>
-              <CardDescription>{source.type}</CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="space-y-5 p-5">
               <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-gray-500">Status</p>
-                  <Badge variant={source.status === 'active' ? 'default' : source.status === 'pending' ? 'secondary' : 'outline'} className="mt-1">
+                <div className="rounded-lg bg-gray-50 p-3 border border-gray-200">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Status</p>
+                  <Badge variant={source.status === 'active' ? 'default' : source.status === 'pending' ? 'secondary' : 'outline'} className="mt-2 shadow-xs capitalize">
                     {source.status}
                   </Badge>
                 </div>
-                <div>
-                  <p className="text-gray-500">Entities</p>
-                  <p className="font-medium text-gray-900 mt-1">{source.entities.toLocaleString()}</p>
+                <div className="rounded-lg bg-gray-50 p-3 border border-gray-200">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Entities</p>
+                  <p className="font-bold text-lg text-gray-900 mt-1">{source.entities.toLocaleString()}</p>
                 </div>
               </div>
-              <div>
-                <p className="text-xs text-gray-500">Last Sync</p>
-                <p className="text-sm text-gray-900 mt-1">{source.lastSync}</p>
+              <div className="rounded-lg bg-gray-50 p-3 border border-gray-200">
+                <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Last Sync</p>
+                <p className="text-sm text-gray-900 mt-1.5 font-medium">{source.lastSync}</p>
               </div>
               {source.apiUrl && (
-                <div className="pt-2 border-t border-gray-200">
+                <div className="pt-3 border-t border-gray-200">
                   <a
                     href={source.apiUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-1"
+                    className="text-xs text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 transition-colors"
                   >
                     View API Docs
                     <ExternalLink className="h-3 w-3" />
                   </a>
                 </div>
               )}
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" className="flex-1">
+              <div className="flex gap-2 pt-2">
+                <Button size="sm" variant="outline" className="flex-1 shadow-xs hover:shadow-md transition-all">
                   Configure
                 </Button>
-                <Button size="sm" variant="outline" className="flex-1">
+                <Button size="sm" variant="outline" className="flex-1 shadow-xs hover:shadow-md transition-all">
                   Sync Now
                 </Button>
               </div>
@@ -214,10 +223,10 @@ export function DataSources() {
       </div>
 
       {filteredSources.length === 0 && (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <Database className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-            <p className="text-gray-600">No data sources found matching your search.</p>
+        <Card className="shadow-sm">
+          <CardContent className="py-16 text-center">
+            <Database className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+            <p className="text-gray-600 font-medium">No data sources found matching your search.</p>
           </CardContent>
         </Card>
       )}

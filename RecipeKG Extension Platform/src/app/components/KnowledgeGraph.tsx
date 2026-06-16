@@ -132,21 +132,26 @@ export function KnowledgeGraph() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-semibold text-gray-900">Knowledge Graph</h2>
-          <p className="text-gray-600 mt-1">
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-gradient-to-br from-blue-50 to-indigo-50 p-2.5 border border-blue-200">
+              <Network className="h-6 w-6 text-blue-600" />
+            </div>
+            <h2 className="text-3xl font-bold text-gray-900">Knowledge Graph</h2>
+          </div>
+          <p className="text-gray-600 mt-2">
             Visualize and explore relationships in your RecipeKG
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" className="gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" className="gap-2 shadow-sm hover:shadow-md transition-all">
             <Maximize2 className="h-4 w-4" />
             Fullscreen
           </Button>
-          <Button variant="outline" className="gap-2">
+          <Button variant="outline" className="gap-2 shadow-sm hover:shadow-md transition-all">
             <Download className="h-4 w-4" />
             Export
           </Button>
@@ -155,35 +160,35 @@ export function KnowledgeGraph() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="pt-6">
+        <Card className="shadow-sm hover:shadow-md transition-shadow">
+          <CardContent className="pt-6 pb-6">
             <div className="text-center">
-              <p className="text-sm text-gray-600">Recipes</p>
-              <p className="text-2xl font-semibold text-blue-600 mt-1">{entityStats.recipes}</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Recipes</p>
+              <p className="text-3xl font-bold text-blue-600 mt-3">{entityStats.recipes}</p>
             </div>
           </CardContent>
         </Card>
-        <Card>
-          <CardContent className="pt-6">
+        <Card className="shadow-sm hover:shadow-md transition-shadow">
+          <CardContent className="pt-6 pb-6">
             <div className="text-center">
-              <p className="text-sm text-gray-600">Ingredients</p>
-              <p className="text-2xl font-semibold text-green-600 mt-1">{entityStats.ingredients}</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Ingredients</p>
+              <p className="text-3xl font-bold text-green-600 mt-3">{entityStats.ingredients}</p>
             </div>
           </CardContent>
         </Card>
-        <Card>
-          <CardContent className="pt-6">
+        <Card className="shadow-sm hover:shadow-md transition-shadow">
+          <CardContent className="pt-6 pb-6">
             <div className="text-center">
-              <p className="text-sm text-gray-600">Nutrients</p>
-              <p className="text-2xl font-semibold text-orange-600 mt-1">{entityStats.nutrients}</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Nutrients</p>
+              <p className="text-3xl font-bold text-orange-600 mt-3">{entityStats.nutrients}</p>
             </div>
           </CardContent>
         </Card>
-        <Card>
-          <CardContent className="pt-6">
+        <Card className="shadow-sm hover:shadow-md transition-shadow">
+          <CardContent className="pt-6 pb-6">
             <div className="text-center">
-              <p className="text-sm text-gray-600">Categories</p>
-              <p className="text-2xl font-semibold text-purple-600 mt-1">{entityStats.categories}</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600">Categories</p>
+              <p className="text-3xl font-bold text-purple-600 mt-3">{entityStats.categories}</p>
             </div>
           </CardContent>
         </Card>
@@ -191,14 +196,14 @@ export function KnowledgeGraph() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Graph Visualization */}
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Graph Visualization</CardTitle>
+        <Card className="lg:col-span-2 shadow-sm">
+          <CardHeader className="border-b bg-gradient-to-r from-blue-50 to-indigo-50">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <CardTitle className="text-lg font-semibold">Graph Visualization</CardTitle>
               <div className="flex items-center gap-2">
                 <Filter className="h-4 w-4 text-gray-500" />
                 <Select value={filterType} onValueChange={setFilterType}>
-                  <SelectTrigger className="w-[140px]">
+                  <SelectTrigger className="w-[140px] shadow-sm">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -212,31 +217,31 @@ export function KnowledgeGraph() {
               </div>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-6">
             <div className="relative">
               <canvas
                 ref={canvasRef}
                 width={800}
                 height={500}
-                className="border border-gray-200 rounded-lg cursor-pointer w-full"
+                className="border border-gray-200 rounded-lg cursor-pointer w-full shadow-xs hover:shadow-sm transition-shadow"
                 onClick={handleCanvasClick}
               />
-              <div className="absolute bottom-4 left-4 bg-white rounded-lg border border-gray-200 p-3 text-xs space-y-1">
+              <div className="absolute bottom-4 left-4 bg-white rounded-lg border border-gray-200 p-3 text-xs space-y-2 shadow-md">
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 rounded-full bg-blue-500"></div>
-                  <span>Recipe</span>
+                  <span className="font-medium text-gray-900">Recipe</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 rounded-full bg-green-500"></div>
-                  <span>Ingredient</span>
+                  <span className="font-medium text-gray-900">Ingredient</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 rounded-full bg-orange-500"></div>
-                  <span>Nutrient</span>
+                  <span className="font-medium text-gray-900">Nutrient</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 rounded-full bg-purple-500"></div>
-                  <span>Category</span>
+                  <span className="font-medium text-gray-900">Category</span>
                 </div>
               </div>
             </div>
@@ -244,14 +249,14 @@ export function KnowledgeGraph() {
         </Card>
 
         {/* Node Details */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Node Details</CardTitle>
-            <CardDescription>
+        <Card className="shadow-sm">
+          <CardHeader className="border-b bg-gradient-to-r from-indigo-50 to-blue-50">
+            <CardTitle className="text-lg font-semibold">Node Details</CardTitle>
+            <CardDescription className="text-sm">
               {selectedNode ? 'Selected entity information' : 'Click a node to view details'}
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-6">
             {selectedNode ? (
               <div className="space-y-4">
                 <div>
@@ -286,42 +291,42 @@ export function KnowledgeGraph() {
       </div>
 
       {/* Entity Search */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Search Entities</CardTitle>
-          <CardDescription>Find specific entities in your knowledge graph</CardDescription>
+      <Card className="shadow-sm">
+        <CardHeader className="border-b bg-gradient-to-r from-emerald-50 to-teal-50">
+          <CardTitle className="text-lg font-semibold">Search Entities</CardTitle>
+          <CardDescription className="text-sm">Find specific entities in your knowledge graph</CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="relative mb-4">
+        <CardContent className="p-6">
+          <div className="relative mb-6">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
             <Input
               placeholder="Search for recipes, ingredients, nutrients..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10"
+              className="pl-10 shadow-xs border-gray-200"
             />
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
             {nodes.filter(node => 
               node.label.toLowerCase().includes(searchQuery.toLowerCase())
             ).map(node => (
               <button
                 key={node.id}
                 onClick={() => setSelectedNode(node)}
-                className={`p-3 border rounded-lg text-left hover:bg-gray-50 transition-colors ${
-                  selectedNode?.id === node.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'
+                className={`p-4 border rounded-lg text-left hover:shadow-md transition-all ${
+                  selectedNode?.id === node.id ? 'border-blue-500 bg-blue-50 shadow-md' : 'border-gray-200 shadow-xs hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center gap-2 mb-1">
-                  <div className={`w-2 h-2 rounded-full ${
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`w-2.5 h-2.5 rounded-full ${
                     node.type === 'recipe' ? 'bg-blue-500' :
                     node.type === 'ingredient' ? 'bg-green-500' :
                     node.type === 'nutrient' ? 'bg-orange-500' :
                     'bg-purple-500'
                   }`}></div>
-                  <span className="text-sm font-medium text-gray-900">{node.label}</span>
+                  <span className="text-sm font-semibold text-gray-900 line-clamp-1">{node.label}</span>
                 </div>
-                <p className="text-xs text-gray-500 capitalize">{node.type}</p>
+                <p className="text-xs text-gray-600 capitalize font-medium">{node.type}</p>
               </button>
             ))}
           </div>
